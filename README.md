@@ -1,22 +1,22 @@
-# Claude-on-OpenAI Proxy
+# Claude Code but with OpenAI Models 🧙‍♂️🔄
 
-🚀 **Use Claude Code with OpenAI Models** 🚀
+**Use Claude Code with OpenAI Models** 🤝
 
-A proxy server that lets you use Claude Code with OpenAI models like GPT-4o.
+A proxy server that lets you use Claude Code with OpenAI models like GPT-4o. 🌉
 
-## Why Use This?
+## Why Use This? 🤔
 
-- 🧠 **Leverage Claude Code with more models**: Use Claude Code's powerful coding interface but with OpenAI's more affordable models
-- ⚡ **No code changes needed**: Your Claude clients work without modification
-- 🔄 **Transparent model swapping**: Claude requests are automatically routed to OpenAI equivalents
+- **Leverage Claude Code with more models**: Use Claude Code's powerful coding interface but with OpenAI's more affordable models 💰
+- **No code changes needed**: Your Claude clients work without modification ✨
+- **Transparent model swapping**: Claude requests are automatically routed to OpenAI equivalents 🪄
 
-## Quick Start
+## Quick Start ⚡
 
 ### Prerequisites
 
-- OpenAI API key
+- OpenAI API key 🔑
 
-### Setup
+### Setup 🛠️
 
 1. **Clone this repository**:
    ```bash
@@ -40,7 +40,7 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o.
    uv run uvicorn server:app --host 0.0.0.0 --port 8082
    ```
 
-### Using with Claude Code
+### Using with Claude Code 🎮
 
 1. **Install Claude Code** (if you haven't already):
    ```bash
@@ -52,9 +52,9 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o.
    ANTHROPIC_BASE_URL=http://localhost:8082 DISABLE_PROMPT_CACHING=1 claude
    ```
 
-3. **That's it!** Your Claude Code client will now use OpenAI models through the proxy.
+3. **That's it!** Your Claude Code client will now use OpenAI models through the proxy. 🎯
 
-## Model Mapping
+## Model Mapping 🗺️
 
 The proxy automatically maps Claude models to OpenAI models:
 
@@ -64,22 +64,20 @@ The proxy automatically maps Claude models to OpenAI models:
 | sonnet | o3-mini |
 
 
-You can customize these mappings in `server.py` by editing the `validate_model` function.
+You can customize these mappings in `server.py` by editing the `validate_model` function. 🔧
 
-## How It Works
+## How It Works 🧩
 
 This proxy works by:
 
-1. **Receiving requests** in Anthropic's API format
-2. **Translating** the requests to OpenAI format via LiteLLM
-3. **Sending** the translated request to OpenAI
-4. **Converting** the response back to Anthropic format
-5. **Returning** the formatted response to the client
+1. **Receiving requests** in Anthropic's API format 📥
+2. **Translating** the requests to OpenAI format via LiteLLM 🔄
+3. **Sending** the translated request to OpenAI 📤
+4. **Converting** the response back to Anthropic format 🔄
+5. **Returning** the formatted response to the client ✅
 
-The proxy handles both streaming and non-streaming responses, maintaining compatibility with all Claude clients.
+The proxy handles both streaming and non-streaming responses, maintaining compatibility with all Claude clients. 🌊
 
-## Contributing
+## Contributing 🤝
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-
+Contributions are welcome! Please feel free to submit a Pull Request. 🎁
