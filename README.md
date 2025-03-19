@@ -1,4 +1,4 @@
-# Claude Code but with OpenAI Models 🧙‍♂️🔄
+# Claude Code but with OpenAI Models 🧙‍♂️🔄 ¯\_(ツ)_/¯
 
 **Use Claude Code with OpenAI Models** 🤝
 
