@@ -6,9 +6,7 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o. �
 
 ## Why Use This? 🤔
 
-- **Leverage Claude Code with more models**: Use Claude Code's powerful coding interface but with OpenAI's more affordable models 💰
-- **No code changes needed**: Your Claude clients work without modification ✨
-- **Transparent model swapping**: Claude requests are automatically routed to OpenAI equivalents 🪄
+- Why not? ¯\\_(ツ)_/¯
 
 ## Quick Start ⚡
 
