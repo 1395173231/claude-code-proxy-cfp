@@ -26,7 +26,7 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o. ðŸŒ
 
 2. **Install UV**:
    ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 3. **Configure your API keys**:
