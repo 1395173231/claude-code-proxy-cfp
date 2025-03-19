@@ -2,11 +2,8 @@
 
 **Use Claude Code with OpenAI Models** 🤝
 
-A proxy server that lets you use Claude Code with OpenAI models like GPT-4o. 🌉
+A proxy server that lets you use Claude Code with OpenAI models like GPT-4o / gpt-4.5 and o3-mini. 🌉
 
-## Why Use This? 🤔
-
-- Why not? ¯\\_(ツ)_/¯
 
 ## Quick Start ⚡
 
@@ -31,6 +28,9 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o. �
    Create a `.env` file with:
    ```
    OPENAI_API_KEY=your-openai-key
+   # Optional: customize which models are used
+   # BIG_MODEL=gpt-4o
+   # SMALL_MODEL=gpt-4o-mini
    ```
 
 4. **Start the proxy server**:
@@ -58,11 +58,27 @@ The proxy automatically maps Claude models to OpenAI models:
 
 | Claude Model | OpenAI Model |
 |--------------|--------------|
-| haiku | gpt-4o-mini |
-| sonnet | gpt-4o |
+| haiku | gpt-4o-mini (default) |
+| sonnet | gpt-4o (default) |
 
+### Customizing Model Mapping
 
-You can customize these mappings in `server.py` by editing the `validate_model` function. 🔧
+You can customize which OpenAI models are used via environment variables:
+
+- `BIG_MODEL`: The OpenAI model to use for Claude Sonnet models (default: "gpt-4o")
+- `SMALL_MODEL`: The OpenAI model to use for Claude Haiku models (default: "gpt-4o-mini")
+
+Add these to your `.env` file to customize:
+```
+OPENAI_API_KEY=your-openai-key
+BIG_MODEL=gpt-4o
+SMALL_MODEL=gpt-4o-mini
+```
+
+Or set them directly when running the server:
+```bash
+BIG_MODEL=gpt-4o SMALL_MODEL=gpt-4o-mini uv run uvicorn server:app --host 0.0.0.0 --port 8082
+```
 
 ## How It Works 🧩
 

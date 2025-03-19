@@ -11,6 +11,9 @@ import litellm
 import uuid
 import time
 from dotenv import load_dotenv
+import re
+from datetime import datetime
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,7 +25,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
+# Configure uvicorn to be quieter
+import uvicorn
+# Tell uvicorn's loggers to be quiet
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 # Create a filter to block any log messages containing specific strings
 class MessageFilter(logging.Filter):
@@ -77,6 +85,10 @@ app = FastAPI()
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# Get model mapping configuration from environment
+BIG_MODEL = os.environ.get("BIG_MODEL", "gpt-4o")
+SMALL_MODEL = os.environ.get("SMALL_MODEL", "gpt-4o-mini")
+
 # Models for Anthropic API requests
 class ContentBlockText(BaseModel):
     type: Literal["text"]
@@ -127,33 +139,43 @@ class MessagesRequest(BaseModel):
     tools: Optional[List[Tool]] = None
     tool_choice: Optional[Dict[str, Any]] = None
     thinking: Optional[ThinkingConfig] = None
+    original_model: Optional[str] = None  # Will store the original model name
     
     @field_validator('model')
-    def validate_model(cls, v):
+    def validate_model(cls, v, info):
+        # Store the original model name
+        original_model = v
+        
         # Check if we're using OpenAI models and need to swap
         if USE_OPENAI_MODELS:
-            original_model = v
             # Remove anthropic/ prefix if it exists
             if v.startswith('anthropic/'):
                 v = v[10:]  # Remove 'anthropic/' prefix
             
-            # Swap Haiku with 4o-mini
+            # Swap Haiku with small model (default: gpt-4o-mini)
             if 'haiku' in v.lower():
-                new_model = "openai/gpt-4o-mini"
+                new_model = f"openai/{SMALL_MODEL}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                return new_model
+                v = new_model
             
-            # Swap any Sonnet model with 4o
-            if 'sonnet' in v.lower():
-                new_model = "openai/gpt-4o"
+            # Swap any Sonnet model with big model (default: gpt-4o)
+            elif 'sonnet' in v.lower():
+                new_model = f"openai/{BIG_MODEL}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                return new_model
+                v = new_model
             
             # Keep the model as is but add openai/ prefix if not already present
-            if not v.startswith('openai/'):
+            elif not v.startswith('openai/'):
                 new_model = f"openai/{v}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                return new_model
+                v = new_model
+                
+            # Store the original model in the values dictionary
+            # This will be accessible as request.original_model
+            values = info.data
+            if isinstance(values, dict):
+                values['original_model'] = original_model
+                
             return v
         else:
             # Original behavior - ensure anthropic/ prefix
@@ -161,6 +183,12 @@ class MessagesRequest(BaseModel):
             if not v.startswith('anthropic/'):
                 new_model = f"anthropic/{v}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
+                
+                # Store original model
+                values = info.data
+                if isinstance(values, dict):
+                    values['original_model'] = original_model
+                    
                 return new_model
             return v
 
@@ -171,32 +199,54 @@ class TokenCountRequest(BaseModel):
     tools: Optional[List[Tool]] = None
     thinking: Optional[ThinkingConfig] = None
     tool_choice: Optional[Dict[str, Any]] = None
+    original_model: Optional[str] = None  # Will store the original model name
     
     @field_validator('model')
-    def validate_model(cls, v):
+    def validate_model(cls, v, info):
+        # Store the original model name
+        original_model = v
+        
         # Same validation as MessagesRequest
         if USE_OPENAI_MODELS:
-            original_model = v
+            # Remove anthropic/ prefix if it exists
             if v.startswith('anthropic/'):
                 v = v[10:]  
+            
+            # Swap Haiku with small model (default: gpt-4o-mini)
             if 'haiku' in v.lower():
-                new_model = "openai/gpt-4o-mini"
+                new_model = f"openai/{SMALL_MODEL}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                return new_model
-            if 'sonnet' in v.lower():
-                new_model = "openai/gpt-4o"
+                v = new_model
+            
+            # Swap any Sonnet model with big model (default: gpt-4o)
+            elif 'sonnet' in v.lower():
+                new_model = f"openai/{BIG_MODEL}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                return new_model
-            if not v.startswith('openai/'):
+                v = new_model
+            
+            # Keep the model as is but add openai/ prefix if not already present
+            elif not v.startswith('openai/'):
                 new_model = f"openai/{v}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                return new_model
+                v = new_model
+            
+            # Store the original model in the values dictionary
+            values = info.data
+            if isinstance(values, dict):
+                values['original_model'] = original_model
+                
             return v
         else:
-            original_model = v
+            # Original behavior - ensure anthropic/ prefix
             if not v.startswith('anthropic/'):
                 new_model = f"anthropic/{v}"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
+                
+                # Store original model
+                values = info.data
+                if isinstance(values, dict):
+                    values['original_model'] = original_model
+                    
                 return new_model
             return v
 
@@ -942,11 +992,21 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
 
 @app.post("/v1/messages")
 async def create_message(
-    request: MessagesRequest
+    request: MessagesRequest,
+    raw_request: Request
 ):
     try:
-        # Log the incoming request with the original model
-        original_model = request.model
+        # print the body here
+        body = await raw_request.body()
+    
+        # Parse the raw body as JSON since it's bytes
+        body_json = json.loads(body.decode('utf-8'))
+        original_model = body_json.get("model", "unknown")
+        
+        # Get the display name for logging, just the model name without provider prefix
+        display_model = original_model
+        if "/" in display_model:
+            display_model = display_model.split("/")[-1]
         
         # Clean model name for capability check
         clean_model = request.model
@@ -956,43 +1016,6 @@ async def create_message(
             clean_model = clean_model[len("openai/"):]
         
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
-        
-        # # Check if model supports function calling
-        # supports_tools = False
-        # try:
-        #     if clean_model.startswith("gpt-") or clean_model.startswith("claude-"):
-        #         import litellm
-        #         supports_tools = litellm.supports_function_calling(model=clean_model)
-        #         logger.debug(f"Model {clean_model} supports function calling: {supports_tools}")
-        # except Exception as e:
-        #     logger.warning(f"Error checking if model supports function calling: {str(e)}")
-        #     # Default to assuming Claude models support tool use and OpenAI supports function calling
-        #     supports_tools = "claude" in clean_model or "gpt" in clean_model
-        
-        # # Check if we're using tools but the model doesn't support them
-        # has_tools = request.tools is not None and len(request.tools) > 0
-        # if has_tools and not supports_tools:
-        #     logger.warning(f"Model {clean_model} doesn't support tools but request has tools. Will convert to text-only format.")
-            
-        #     # If we're trying to use tools with an unsupported model, remove tools from the request
-        #     # and add a warning message for the user
-        #     original_messages = request.messages
-        #     if len(original_messages) > 0 and original_messages[-1].role == "user":
-        #         content = original_messages[-1].content
-        #         if isinstance(content, str):
-        #             # Add warning to string content
-        #             content = content + "\n\n[Note: Tools were specified in this request, but the model doesn't support tools. I'll answer without using tools.]"
-        #             original_messages[-1].content = content
-        #         elif isinstance(content, list):
-        #             # Find text blocks and add warning
-        #             for i, block in enumerate(content):
-        #                 if hasattr(block, 'type') and block.type == 'text':
-        #                     block.text = block.text + "\n\n[Note: Tools were specified in this request, but the model doesn't support tools. I'll answer without using tools.]"
-        #                     break
-            
-        #     # Remove tools from request
-        #     request.tools = None
-        #     request.tool_choice = None
         
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
@@ -1149,7 +1172,17 @@ async def create_message(
         # Handle streaming mode
         if request.stream:
             # Use LiteLLM for streaming
-            print(f"🚀 Sending {len(litellm_request['messages'])} messages to {litellm_request.get('model')}")
+            num_tools = len(request.tools) if request.tools else 0
+            
+            log_request_beautifully(
+                "POST", 
+                raw_request.url.path, 
+                display_model, 
+                litellm_request.get('model'),
+                len(litellm_request['messages']),
+                num_tools,
+                200  # Assuming success at this point
+            )
             # Ensure we use the async version for streaming
             response_generator = await litellm.acompletion(**litellm_request)
             
@@ -1159,7 +1192,17 @@ async def create_message(
             )
         else:
             # Use LiteLLM for regular completion
-            logger.debug(f"🚀 SENDING REQUEST: Original={original_model}, Actual={litellm_request.get('model')}")
+            num_tools = len(request.tools) if request.tools else 0
+            
+            log_request_beautifully(
+                "POST", 
+                raw_request.url.path, 
+                display_model, 
+                litellm_request.get('model'),
+                len(litellm_request['messages']),
+                num_tools,
+                200  # Assuming success at this point
+            )
             start_time = time.time()
             litellm_response = litellm.completion(**litellm_request)
             logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
@@ -1207,12 +1250,24 @@ async def create_message(
 
 @app.post("/v1/messages/count_tokens")
 async def count_tokens(
-    request: TokenCountRequest
+    request: TokenCountRequest,
+    raw_request: Request
 ):
     try:
         # Log the incoming token count request
-        original_model = request.model
-        logger.debug(f"📊 TOKEN COUNT REQUEST: Model={request.model}")
+        original_model = request.original_model or request.model
+        
+        # Get the display name for logging, just the model name without provider prefix
+        display_model = original_model
+        if "/" in display_model:
+            display_model = display_model.split("/")[-1]
+        
+        # Clean model name for capability check
+        clean_model = request.model
+        if clean_model.startswith("anthropic/"):
+            clean_model = clean_model[len("anthropic/"):]
+        elif clean_model.startswith("openai/"):
+            clean_model = clean_model[len("openai/"):]
         
         # Convert the messages to a format LiteLLM can understand
         converted_request = convert_anthropic_to_litellm(
@@ -1232,13 +1287,24 @@ async def count_tokens(
             # Import token_counter function
             from litellm import token_counter
             
+            # Log the request beautifully
+            num_tools = len(request.tools) if request.tools else 0
+            
+            log_request_beautifully(
+                "POST",
+                raw_request.url.path,
+                display_model,
+                converted_request.get('model'),
+                len(converted_request['messages']),
+                num_tools,
+                200  # Assuming success at this point
+            )
+            
             # Count tokens
             token_count = token_counter(
                 model=converted_request["model"],
                 messages=converted_request["messages"],
             )
-            
-            logger.debug(f"🔢 TOKEN COUNT RESULT: Original={original_model}, Actual={converted_request['model']}, Count={token_count}")
             
             # Return Anthropic-style response
             return TokenCountResponse(input_tokens=token_count)
@@ -1258,9 +1324,56 @@ async def count_tokens(
 async def root():
     return {"message": "Anthropic Proxy for LiteLLM"}
 
+# Define ANSI color codes for terminal output
+class Colors:
+    CYAN = "\033[96m"
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    MAGENTA = "\033[95m"
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+    DIM = "\033[2m"
+def log_request_beautifully(method, path, claude_model, openai_model, num_messages, num_tools, status_code):
+    """Log requests in a beautiful, twitter-friendly format showing Claude to OpenAI mapping."""
+    # Format the Claude model name nicely
+    claude_display = f"{Colors.CYAN}{claude_model}{Colors.RESET}"
+    
+    # Extract endpoint name
+    endpoint = path
+    if "?" in endpoint:
+        endpoint = endpoint.split("?")[0]
+    
+    # Extract just the OpenAI model name without provider prefix
+    openai_display = openai_model
+    if "/" in openai_display:
+        openai_display = openai_display.split("/")[-1]
+    openai_display = f"{Colors.GREEN}{openai_display}{Colors.RESET}"
+    
+    # Format tools and messages
+    tools_str = f"{Colors.MAGENTA}{num_tools} tools{Colors.RESET}"
+    messages_str = f"{Colors.BLUE}{num_messages} messages{Colors.RESET}"
+    
+    # Format status code
+    status_str = f"{Colors.GREEN}✓ {status_code} OK{Colors.RESET}" if status_code == 200 else f"{Colors.RED}✗ {status_code}{Colors.RESET}"
+    
+
+    # Put it all together in a clear, beautiful format
+    log_line = f"{Colors.BOLD}{method} {endpoint}{Colors.RESET} {status_str}"
+    model_line = f"{claude_display} → {openai_display} {tools_str} {messages_str}"
+    
+    # Print to console
+    print(log_line)
+    print(model_line)
+    sys.stdout.flush()
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--help":
         print("Run with: uvicorn server:app --reload --host 0.0.0.0 --port 8082")
         sys.exit(0)
-    uvicorn.run(app, host="0.0.0.0", port=8082)
+    
+    # Configure uvicorn to run with minimal logs
+    uvicorn.run(app, host="0.0.0.0", port=8082, log_level="error")
