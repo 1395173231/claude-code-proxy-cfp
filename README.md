@@ -5,6 +5,8 @@
 A proxy server that lets you use Claude Code with OpenAI models like GPT-4o / gpt-4.5 and o3-mini. 🌉
 
 
+![Claude Code but with OpenAI Models](pic.png)
+
 ## Quick Start ⚡
 
 ### Prerequisites
