@@ -59,7 +59,7 @@ The proxy automatically maps Claude models to OpenAI models:
 | Claude Model | OpenAI Model |
 |--------------|--------------|
 | haiku | gpt-4o-mini |
-| sonnet | o3-mini |
+| sonnet | gpt-4o |
 
 
 You can customize these mappings in `server.py` by editing the `validate_model` function. 🔧

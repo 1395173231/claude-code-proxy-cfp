@@ -145,7 +145,7 @@ class MessagesRequest(BaseModel):
             
             # Swap any Sonnet model with 4o
             if 'sonnet' in v.lower():
-                new_model = "openai/o3-mini"
+                new_model = "openai/gpt-4o"
                 logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
                 return new_model
             
