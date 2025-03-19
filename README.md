@@ -49,7 +49,7 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o / gp
 
 2. **Connect to your proxy**:
    ```bash
-   ANTHROPIC_BASE_URL=http://localhost:8082 DISABLE_PROMPT_CACHING=1 claude
+   ANTHROPIC_BASE_URL=http://localhost:8082 claude
    ```
 
 3. **That's it!** Your Claude Code client will now use OpenAI models through the proxy. 🎯
