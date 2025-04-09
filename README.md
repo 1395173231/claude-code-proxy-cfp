@@ -13,7 +13,7 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
 
 - OpenAI API key 🔑
 - Google AI Studio (Gemini) API key (if using default provider) 🔑
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip installed.
+- [uv](https://github.com/astral-sh/uv) installed.
 
 ### Setup 🛠️
 
@@ -23,18 +23,11 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
    cd claude-code-openai
    ```
 
-2. **Install dependencies**:
-   Using uv (recommended):
+2. **Install uv** (if you haven't already):
    ```bash
-   uv venv # Create virtual environment (optional but recommended)
-   uv pip install fastapi uvicorn litellm python-dotenv httpx # Install main packages
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
-   Or using pip:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate # Or .\venv\Scripts\activate on Windows
-   pip install fastapi uvicorn litellm python-dotenv httpx
-   ```
+   *(`uv` will handle dependencies based on `pyproject.toml` when you run the server)*
 
 3. **Configure Environment Variables**:
    Copy the example environment file:
@@ -55,14 +48,10 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
    - Otherwise (if `PREFERRED_PROVIDER=openai` or the specified Google model isn't known), they map to `SMALL_MODEL`/`BIG_MODEL` prefixed with `openai/`.
 
 4. **Run the server**:
-   Using uv:
    ```bash
    uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload
    ```
-   Or directly with uvicorn (if installed globally or in activated venv):
-   ```bash
-   uvicorn server:app --host 0.0.0.0 --port 8082 --reload
-   ```
+   *(`--reload` is optional, for development)*
 
 ### Using with Claude Code 🎮
 
