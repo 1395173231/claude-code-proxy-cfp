@@ -75,19 +75,65 @@ for handler in logger.handlers:
     if isinstance(handler, logging.StreamHandler):
         handler.setFormatter(ColorizedFormatter('%(asctime)s - %(levelname)s - %(message)s'))
 
-# Flag to enable model swapping between Anthropic and OpenAI
-# Always use OpenAI models
-USE_OPENAI_MODELS = True
-
 app = FastAPI()
 
 # Get API keys from environment
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# Get preferred provider (default to google)
+PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "google").lower()
 
 # Get model mapping configuration from environment
-BIG_MODEL = os.environ.get("BIG_MODEL", "gpt-4o")
-SMALL_MODEL = os.environ.get("SMALL_MODEL", "gpt-4o-mini")
+# Default to latest Gemini models if not set
+BIG_MODEL = os.environ.get("BIG_MODEL", "gemini-1.5-pro-latest")
+SMALL_MODEL = os.environ.get("SMALL_MODEL", "gemini-1.5-flash-latest")
+
+# List of OpenAI models
+OPENAI_MODELS = [
+    "o3-mini",
+    "o1",
+    "o1-mini",
+    "o1-pro",
+    "gpt-4.5-preview",
+    "gpt-4o",
+    "gpt-4o-audio-preview",
+    "chatgpt-4o-latest",
+    "gpt-4o-mini",
+    "gpt-4o-mini-audio-preview"
+]
+
+# List of Gemini models
+GEMINI_MODELS = [
+    "gemini-2.5-pro-preview-03-25",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro-latest", # Added default big model
+    "gemini-1.5-flash-latest" # Added default small model
+]
+
+# Helper function to clean schema for Gemini
+def clean_gemini_schema(schema: Any) -> Any:
+    """Recursively removes unsupported fields from a JSON schema for Gemini."""
+    if isinstance(schema, dict):
+        # Remove specific keys unsupported by Gemini tool parameters
+        schema.pop("additionalProperties", None)
+        schema.pop("default", None)
+
+        # Check for unsupported 'format' in string types
+        if schema.get("type") == "string" and "format" in schema:
+            allowed_formats = {"enum", "date-time"}
+            if schema["format"] not in allowed_formats:
+                logger.debug(f"Removing unsupported format '{schema['format']}' for string type in Gemini schema.")
+                schema.pop("format")
+
+        # Recursively clean nested schemas (properties, items, etc.)
+        for key, value in list(schema.items()): # Use list() to allow modification during iteration
+            schema[key] = clean_gemini_schema(value)
+    elif isinstance(schema, list):
+        # Recursively clean items in a list
+        return [clean_gemini_schema(item) for item in schema]
+    return schema
 
 # Models for Anthropic API requests
 class ContentBlockText(BaseModel):
@@ -142,55 +188,65 @@ class MessagesRequest(BaseModel):
     original_model: Optional[str] = None  # Will store the original model name
     
     @field_validator('model')
-    def validate_model(cls, v, info):
-        # Store the original model name
+    def validate_model_field(cls, v, info): # Renamed to avoid conflict
         original_model = v
-        
-        # Check if we're using OpenAI models and need to swap
-        if USE_OPENAI_MODELS:
-            # Remove anthropic/ prefix if it exists
-            if v.startswith('anthropic/'):
-                v = v[10:]  # Remove 'anthropic/' prefix
-            
-            # Swap Haiku with small model (default: gpt-4o-mini)
-            if 'haiku' in v.lower():
+        new_model = v # Default to original value
+
+        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
+
+        # Remove provider prefixes for easier matching
+        clean_v = v
+        if clean_v.startswith('anthropic/'):
+            clean_v = clean_v[10:]
+        elif clean_v.startswith('openai/'):
+            clean_v = clean_v[7:]
+        elif clean_v.startswith('gemini/'):
+            clean_v = clean_v[7:]
+
+        # --- Mapping Logic --- START ---
+        mapped = False
+        # Map Haiku to SMALL_MODEL based on provider preference
+        if 'haiku' in clean_v.lower():
+            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
+                new_model = f"gemini/{SMALL_MODEL}"
+                mapped = True
+            else:
                 new_model = f"openai/{SMALL_MODEL}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                v = new_model
-            
-            # Swap any Sonnet model with big model (default: gpt-4o)
-            elif 'sonnet' in v.lower():
+                mapped = True
+
+        # Map Sonnet to BIG_MODEL based on provider preference
+        elif 'sonnet' in clean_v.lower():
+            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
+                new_model = f"gemini/{BIG_MODEL}"
+                mapped = True
+            else:
                 new_model = f"openai/{BIG_MODEL}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                v = new_model
-            
-            # Keep the model as is but add openai/ prefix if not already present
-            elif not v.startswith('openai/'):
-                new_model = f"openai/{v}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                v = new_model
-                
-            # Store the original model in the values dictionary
-            # This will be accessible as request.original_model
-            values = info.data
-            if isinstance(values, dict):
-                values['original_model'] = original_model
-                
-            return v
+                mapped = True
+
+        # Add prefixes to non-mapped models if they match known lists
+        elif not mapped:
+            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
+                new_model = f"gemini/{clean_v}"
+                mapped = True # Technically mapped to add prefix
+            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
+                new_model = f"openai/{clean_v}"
+                mapped = True # Technically mapped to add prefix
+        # --- Mapping Logic --- END ---
+
+        if mapped:
+            logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
         else:
-            # Original behavior - ensure anthropic/ prefix
-            original_model = v
-            if not v.startswith('anthropic/'):
-                new_model = f"anthropic/{v}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                
-                # Store original model
-                values = info.data
-                if isinstance(values, dict):
-                    values['original_model'] = original_model
-                    
-                return new_model
-            return v
+             # If no mapping occurred and no prefix exists, log warning or decide default
+             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
+                 logger.warning(f"⚠️ No prefix or mapping rule for model: '{original_model}'. Using as is.")
+             new_model = v # Ensure we return the original if no rule applied
+
+        # Store the original model in the values dictionary
+        values = info.data
+        if isinstance(values, dict):
+            values['original_model'] = original_model
+
+        return new_model
 
 class TokenCountRequest(BaseModel):
     model: str
@@ -202,53 +258,67 @@ class TokenCountRequest(BaseModel):
     original_model: Optional[str] = None  # Will store the original model name
     
     @field_validator('model')
-    def validate_model(cls, v, info):
-        # Store the original model name
+    def validate_model_token_count(cls, v, info): # Renamed to avoid conflict
+        # Use the same logic as MessagesRequest validator
+        # NOTE: Pydantic validators might not share state easily if not class methods
+        # Re-implementing the logic here for clarity, could be refactored
         original_model = v
-        
-        # Same validation as MessagesRequest
-        if USE_OPENAI_MODELS:
-            # Remove anthropic/ prefix if it exists
-            if v.startswith('anthropic/'):
-                v = v[10:]  
-            
-            # Swap Haiku with small model (default: gpt-4o-mini)
-            if 'haiku' in v.lower():
+        new_model = v # Default to original value
+
+        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
+
+        # Remove provider prefixes for easier matching
+        clean_v = v
+        if clean_v.startswith('anthropic/'):
+            clean_v = clean_v[10:]
+        elif clean_v.startswith('openai/'):
+            clean_v = clean_v[7:]
+        elif clean_v.startswith('gemini/'):
+            clean_v = clean_v[7:]
+
+        # --- Mapping Logic --- START ---
+        mapped = False
+        # Map Haiku to SMALL_MODEL based on provider preference
+        if 'haiku' in clean_v.lower():
+            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
+                new_model = f"gemini/{SMALL_MODEL}"
+                mapped = True
+            else:
                 new_model = f"openai/{SMALL_MODEL}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                v = new_model
-            
-            # Swap any Sonnet model with big model (default: gpt-4o)
-            elif 'sonnet' in v.lower():
+                mapped = True
+
+        # Map Sonnet to BIG_MODEL based on provider preference
+        elif 'sonnet' in clean_v.lower():
+            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
+                new_model = f"gemini/{BIG_MODEL}"
+                mapped = True
+            else:
                 new_model = f"openai/{BIG_MODEL}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                v = new_model
-            
-            # Keep the model as is but add openai/ prefix if not already present
-            elif not v.startswith('openai/'):
-                new_model = f"openai/{v}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                v = new_model
-            
-            # Store the original model in the values dictionary
-            values = info.data
-            if isinstance(values, dict):
-                values['original_model'] = original_model
-                
-            return v
+                mapped = True
+
+        # Add prefixes to non-mapped models if they match known lists
+        elif not mapped:
+            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
+                new_model = f"gemini/{clean_v}"
+                mapped = True # Technically mapped to add prefix
+            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
+                new_model = f"openai/{clean_v}"
+                mapped = True # Technically mapped to add prefix
+        # --- Mapping Logic --- END ---
+
+        if mapped:
+            logger.debug(f"📌 TOKEN COUNT MAPPING: '{original_model}' ➡️ '{new_model}'")
         else:
-            # Original behavior - ensure anthropic/ prefix
-            if not v.startswith('anthropic/'):
-                new_model = f"anthropic/{v}"
-                logger.debug(f"📌 MODEL MAPPING: {original_model} ➡️ {new_model}")
-                
-                # Store original model
-                values = info.data
-                if isinstance(values, dict):
-                    values['original_model'] = original_model
-                    
-                return new_model
-            return v
+             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
+                 logger.warning(f"⚠️ No prefix or mapping rule for token count model: '{original_model}'. Using as is.")
+             new_model = v # Ensure we return the original if no rule applied
+
+        # Store the original model in the values dictionary
+        values = info.data
+        if isinstance(values, dict):
+            values['original_model'] = original_model
+
+        return new_model
 
 class TokenCountResponse(BaseModel):
     input_tokens: int
@@ -463,9 +533,9 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     
     # Cap max_tokens for OpenAI models to their limit of 16384
     max_tokens = anthropic_request.max_tokens
-    if anthropic_request.model.startswith("openai/") or USE_OPENAI_MODELS:
+    if anthropic_request.model.startswith("openai/") or anthropic_request.model.startswith("gemini/"):
         max_tokens = min(max_tokens, 16384)
-        logger.debug(f"Capping max_tokens to 16384 for OpenAI model (original value: {anthropic_request.max_tokens})")
+        logger.debug(f"Capping max_tokens to 16384 for OpenAI/Gemini model (original value: {anthropic_request.max_tokens})")
     
     # Create LiteLLM request dict
     litellm_request = {
@@ -489,24 +559,37 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     # Convert tools to OpenAI format
     if anthropic_request.tools:
         openai_tools = []
+        is_gemini_model = anthropic_request.model.startswith("gemini/")
+
         for tool in anthropic_request.tools:
             # Convert to dict if it's a pydantic model
             if hasattr(tool, 'dict'):
                 tool_dict = tool.dict()
             else:
-                tool_dict = tool
-                
+                # Ensure tool_dict is a dictionary, handle potential errors if 'tool' isn't dict-like
+                try:
+                    tool_dict = dict(tool) if not isinstance(tool, dict) else tool
+                except (TypeError, ValueError):
+                     logger.error(f"Could not convert tool to dict: {tool}")
+                     continue # Skip this tool if conversion fails
+
+            # Clean the schema if targeting a Gemini model
+            input_schema = tool_dict.get("input_schema", {})
+            if is_gemini_model:
+                 logger.debug(f"Cleaning schema for Gemini tool: {tool_dict.get('name')}")
+                 input_schema = clean_gemini_schema(input_schema)
+
             # Create OpenAI-compatible function tool
             openai_tool = {
                 "type": "function",
                 "function": {
                     "name": tool_dict["name"],
                     "description": tool_dict.get("description", ""),
-                    "parameters": tool_dict["input_schema"]
+                    "parameters": input_schema # Use potentially cleaned schema
                 }
             }
             openai_tools.append(openai_tool)
-            
+
         litellm_request["tools"] = openai_tools
     
     # Convert tool_choice to OpenAI format if present
@@ -1024,6 +1107,9 @@ async def create_message(
         if request.model.startswith("openai/"):
             litellm_request["api_key"] = OPENAI_API_KEY
             logger.debug(f"Using OpenAI API key for model: {request.model}")
+        elif request.model.startswith("gemini/"):
+            litellm_request["api_key"] = GEMINI_API_KEY
+            logger.debug(f"Using Gemini API key for model: {request.model}")
         else:
             litellm_request["api_key"] = ANTHROPIC_API_KEY
             logger.debug(f"Using Anthropic API key for model: {request.model}")
