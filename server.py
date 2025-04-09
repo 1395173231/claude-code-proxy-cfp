@@ -87,8 +87,8 @@ PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "google").lower()
 
 # Get model mapping configuration from environment
 # Default to latest Gemini models if not set
-BIG_MODEL = os.environ.get("BIG_MODEL", "gemini-1.5-pro-latest")
-SMALL_MODEL = os.environ.get("SMALL_MODEL", "gemini-1.5-flash-latest")
+BIG_MODEL = os.environ.get("BIG_MODEL", "gemini-2.5-pro-preview-03-25")
+SMALL_MODEL = os.environ.get("SMALL_MODEL", "gemini-2.0-flash")
 
 # List of OpenAI models
 OPENAI_MODELS = [
@@ -107,9 +107,7 @@ OPENAI_MODELS = [
 # List of Gemini models
 GEMINI_MODELS = [
     "gemini-2.5-pro-preview-03-25",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro-latest", # Added default big model
-    "gemini-1.5-flash-latest" # Added default small model
+    "gemini-2.0-flash"
 ]
 
 # Helper function to clean schema for Gemini
