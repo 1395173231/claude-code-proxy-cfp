@@ -12,6 +12,8 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
 ### Prerequisites
 
 - OpenAI API key 🔑
+- Google AI Studio (Gemini) API key (if using default provider) 🔑
+- [uv](https://github.com/astral-sh/uv) (recommended) or pip installed.
 
 ### Setup 🛠️
 
@@ -22,10 +24,17 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
    ```
 
 2. **Install dependencies**:
+   Using uv (recommended):
    ```bash
-   pip install -r requirements.txt
+   uv venv # Create virtual environment (optional but recommended)
+   uv pip install fastapi uvicorn litellm python-dotenv httpx # Install main packages
    ```
-   *(Ensure `requirements.txt` includes FastAPI, Uvicorn, LiteLLM, python-dotenv, httpx)*
+   Or using pip:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate # Or .\venv\Scripts\activate on Windows
+   pip install fastapi uvicorn litellm python-dotenv httpx
+   ```
 
 3. **Configure Environment Variables**:
    Copy the example environment file:
@@ -46,6 +55,11 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
    - Otherwise (if `PREFERRED_PROVIDER=openai` or the specified Google model isn't known), they map to `SMALL_MODEL`/`BIG_MODEL` prefixed with `openai/`.
 
 4. **Run the server**:
+   Using uv:
+   ```bash
+   uv run uvicorn server:app --host 0.0.0.0 --port 8082 --reload
+   ```
+   Or directly with uvicorn (if installed globally or in activated venv):
    ```bash
    uvicorn server:app --host 0.0.0.0 --port 8082 --reload
    ```
@@ -125,15 +139,13 @@ SMALL_MODEL=gpt-4o-mini
 
 Or set them directly when running the server:
 ```bash
-# Using OpenAI models
+# Using OpenAI models (with uv)
 BIG_MODEL=gpt-4o SMALL_MODEL=gpt-4o-mini uv run uvicorn server:app --host 0.0.0.0 --port 8082
 
-# Using Gemini models
+# Using Gemini models (with uv)
 BIG_MODEL=gemini-2.5-pro-preview-03-25 SMALL_MODEL=gemini-2.0-flash uv run uvicorn server:app --host 0.0.0.0 --port 8082
-```
 
-To use a mix of OpenAI and Gemini models:
-```bash
+# Mix and match (with uv)
 BIG_MODEL=gemini-2.5-pro-preview-03-25 SMALL_MODEL=gpt-4o-mini uv run uvicorn server:app --host 0.0.0.0 --port 8082
 ```
 
