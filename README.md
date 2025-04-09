@@ -1,11 +1,11 @@
-# Claude Code but with OpenAI Models 🧙‍♂️🔄 ¯\\_(ツ)_/¯
+# Anthropic API Proxy for Gemini & OpenAI Models 🔄
 
-**Use Claude Code with OpenAI Models** 🤝
+**Use Anthropic clients (like Claude Code) with Gemini or OpenAI backends.** 🤝
 
-A proxy server that lets you use Claude Code with OpenAI models like GPT-4o / gpt-4.5 and o3-mini. 🌉
+A proxy server that lets you use Anthropic clients with Gemini or OpenAI models via LiteLLM. 🌉
 
 
-![Claude Code but with OpenAI Models](pic.png)
+![Anthropic API Proxy](pic.png)
 
 ## Quick Start ⚡
 
@@ -62,7 +62,7 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o / gp
    ANTHROPIC_BASE_URL=http://localhost:8082 claude
    ```
 
-3. **That's it!** Your Claude Code client will now use OpenAI models through the proxy. 🎯
+3. **That's it!** Your Claude Code client will now use the configured backend models (defaulting to Gemini) through the proxy. 🎯
 
 ## Model Mapping 🗺️
 
