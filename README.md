@@ -21,28 +21,33 @@ A proxy server that lets you use Claude Code with OpenAI models like GPT-4o / gp
    cd claude-code-openai
    ```
 
-2. **Install UV**:
+2. **Install dependencies**:
    ```bash
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+   pip install -r requirements.txt
    ```
+   *(Ensure `requirements.txt` includes FastAPI, Uvicorn, LiteLLM, python-dotenv, httpx)*
 
-3. **Configure your API keys**:
-   Create a `.env` file with:
-   ```
-   OPENAI_API_KEY=your-openai-key
-   # Optional: customize which models are used
-   # For OpenAI models (default)
-   # BIG_MODEL=gpt-4o
-   # SMALL_MODEL=gpt-4o-mini
-   
-   # For Gemini models
-   # BIG_MODEL=gemini-2.5-pro-preview-03-25
-   # SMALL_MODEL=gemini-2.0-flash
-   ```
-
-4. **Start the proxy server**:
+3. **Configure Environment Variables**:
+   Copy the example environment file:
    ```bash
-   uv run uvicorn server:app --host 0.0.0.0 --port 8082
+   cp .env.example .env
+   ```
+   Edit `.env` and fill in your API keys and model configurations:
+
+   *   `ANTHROPIC_API_KEY`: (Optional) Needed only if proxying *to* Anthropic models.
+   *   `OPENAI_API_KEY`: Your OpenAI API key (Required if using OpenAI models as fallback or primary).
+   *   `GEMINI_API_KEY`: Your Google AI Studio (Gemini) API key (Required if using the default Gemini preference).
+   *   `PREFERRED_PROVIDER` (Optional): Set to `google` (default) or `openai`. This determines the primary backend for mapping `haiku`/`sonnet`.
+   *   `BIG_MODEL` (Optional): The model to map `sonnet` requests to. Defaults to `gemini-1.5-pro-latest` (if `PREFERRED_PROVIDER=google` and model is known) or `gpt-4o`.
+   *   `SMALL_MODEL` (Optional): The model to map `haiku` requests to. Defaults to `gemini-1.5-flash-latest` (if `PREFERRED_PROVIDER=google` and model is known) or `gpt-4o-mini`.
+
+   **Mapping Logic:**
+   - If `PREFERRED_PROVIDER=google` (default), `haiku`/`sonnet` map to `SMALL_MODEL`/`BIG_MODEL` prefixed with `gemini/` *if* those models are in the server's known `GEMINI_MODELS` list.
+   - Otherwise (if `PREFERRED_PROVIDER=openai` or the specified Google model isn't known), they map to `SMALL_MODEL`/`BIG_MODEL` prefixed with `openai/`.
+
+4. **Run the server**:
+   ```bash
+   uvicorn server:app --host 0.0.0.0 --port 8082 --reload
    ```
 
 ### Using with Claude Code 🎮
