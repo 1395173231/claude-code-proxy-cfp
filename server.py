@@ -12,7 +12,8 @@ import uuid
 import time
 from dotenv import load_dotenv
 from cfp_adapter import build_cfp_messages, adapt_request_for_cfp, adapt_response_from_cfp, parse_cfp_response
-# litellm._turn_on_debug()
+if os.environ.get("DEBUG").lower() == "true":
+    litellm._turn_on_debug()
 # Load environment variables from .env file
 load_dotenv()
 
@@ -908,6 +909,9 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         cfp_tool_processed = False
         text_block_started = False
 
+        # 用于跟踪工具调用状态
+        tool_calls_in_progress = {}  # {index: {id, name, arguments}}
+
         async for chunk in response_generator:
             try:
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
@@ -930,8 +934,65 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                     elif isinstance(delta, dict) and 'content' in delta:
                         delta_content = delta['content']
 
+                    # 处理工具调用
+                    tool_calls = None
+                    if hasattr(delta, 'tool_calls'):
+                        tool_calls = delta.tool_calls
+                    elif isinstance(delta, dict) and 'tool_calls' in delta:
+                        tool_calls = delta['tool_calls']
+
+                    # ============ 处理上游直接返回的 tool_calls ============
+                    if tool_calls and not cfp_used:
+                        for tool_call in tool_calls:
+                            # 获取工具调用的基本信息
+                            tool_id = getattr(tool_call, 'id', '') or f'toolu_{uuid.uuid4().hex[:24]}'
+                            tool_type = getattr(tool_call, 'type', 'function')
+                            tool_index = getattr(tool_call, 'index', 0)
+
+                            if tool_type == 'function' and hasattr(tool_call, 'function'):
+                                function = tool_call.function
+                                function_name = getattr(function, 'name', '')
+                                function_arguments = getattr(function, 'arguments', '')
+
+                                # 如果是新的工具调用，初始化状态
+                                if tool_index not in tool_calls_in_progress:
+                                    tool_calls_in_progress[tool_index] = {
+                                        'id': tool_id,
+                                        'name': function_name,
+                                        'arguments': '',
+                                        'started': False
+                                    }
+
+                                # 更新工具调用状态
+                                tool_call_state = tool_calls_in_progress[tool_index]
+                                if function_name and not tool_call_state['name']:
+                                    tool_call_state['name'] = function_name
+                                if function_arguments:
+                                    tool_call_state['arguments'] += function_arguments
+
+                                # 发送 content_block_start 事件（只发送一次）
+                                if not tool_call_state['started']:
+                                    tool_call_state['started'] = True
+                                    # 确保先关闭文本块
+                                    if text_block_started and not text_block_closed:
+                                        text_block_closed = True
+                                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+
+                                    # 计算实际的块索引
+                                    actual_index = tool_index + (1 if text_block_started else 0)
+                                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': actual_index, 'content_block': {'type': 'tool_use', 'id': tool_id, 'name': function_name, 'input': {}}})}\n\n"
+
+                                # 发送增量数据
+                                if function_arguments:
+                                    actual_index = tool_index + (1 if text_block_started else 0)
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': actual_index, 'delta': {'type': 'input_json_delta', 'partial_json': function_arguments}})}\n\n"
+
+                        # 如果有工具调用，设置完成原因
+                        if tool_calls:
+                            finish_reason = "tool_use"
+
                     # ============ CFP 模式处理 ============
-                    if cfp_used and delta_content is not None and delta_content != "":
+                    elif cfp_used and delta_content is not None and delta_content != "":
                         cfp_buffer += delta_content
                         accumulated_text += delta_content
 
@@ -957,8 +1018,8 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                             except Exception as cfp_error:
                                 pass
 
-                    # ============ 非 CFP 模式处理 ============
-                    elif not cfp_used and delta_content is not None and delta_content != "":
+                    # ============ 非 CFP 模式处理普通文本 ============
+                    elif not cfp_used and delta_content is not None and delta_content != "" and not tool_calls:
                         accumulated_text += delta_content
                         if tool_index is None and not text_block_closed:
                             if not text_block_started:
@@ -970,6 +1031,12 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                     # ============ 处理完成原因 ============
                     if finish_reason and not has_sent_stop_reason:
                         has_sent_stop_reason = True
+
+                        # 完成所有正在进行的工具调用
+                        for tool_idx, tool_call_state in tool_calls_in_progress.items():
+                            if tool_call_state['started']:
+                                actual_index = tool_idx + (1 if text_block_started else 0)
+                                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': actual_index})}\n\n"
 
                         # CFP 模式下，如果没有检测到工具调用，则输出纯文本
                         if cfp_used and not cfp_tool_processed and accumulated_text.strip():
@@ -998,7 +1065,7 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                         stop_reason = "end_turn"
                         if finish_reason == "length":
                             stop_reason = "max_tokens"
-                        elif finish_reason == "tool_calls" or cfp_tool_processed:
+                        elif finish_reason == "tool_calls" or cfp_tool_processed or tool_calls_in_progress:
                             stop_reason = "tool_use"
                         elif finish_reason == "stop":
                             stop_reason = "end_turn"
