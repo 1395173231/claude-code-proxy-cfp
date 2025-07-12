@@ -1035,11 +1035,11 @@ async def create_message(
         display_model = original_model
         if "/" in display_model:
             display_model = display_model.split("/")[-1]
-        clean_model = request.model
-        if clean_model.startswith("anthropic/"):
-            clean_model = clean_model[len("anthropic/"):]
-        elif clean_model.startswith("openai/"):
-            clean_model = clean_model[len("openai/"):]
+        if "/" in request.model:
+            clean_model =request.model.split("/")[-1]
+        else:
+            clean_model = request.model
+
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
 
         # 原有逻辑
@@ -1204,7 +1204,17 @@ async def create_message(
             _cfp_used = False
         # Only log basic info about the request, not the full details
         logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
-        
+        api_base = os.environ.get("BASE_URL", os.environ.get("API_BASE", "https://api.openai.com/v1"));
+        if request.model.startswith("gemini"):
+            if "/v1" in api_base:
+                api_base += f"/models/{clean_model}"
+            else:
+                api_base += f"/v1beta/models/{clean_model}"
+        litellm_request.update({
+            "api_base": api_base,
+            "base_url": api_base,
+            "api_key": os.environ.get("API_KEY", "<KEY>"),
+        })
         # Handle streaming mode
         if request.stream:
             # Use LiteLLM for streaming
@@ -1220,10 +1230,6 @@ async def create_message(
                 200  # Assuming success at this point
             )
             # Ensure we use the async version for streaming
-            litellm_request.update({
-                "api_base": os.environ.get("API_BASE", "https://easyone.eqing.tech/v1"),
-                "api_key": os.environ.get("API_KEY", "<KEY>"),
-            })
             response_generator = await litellm.acompletion(**litellm_request)
             
             return StreamingResponse(
@@ -1242,11 +1248,6 @@ async def create_message(
                 num_tools,
                 200  # Assuming success at this point
             )
-            litellm_request.update({
-                # api key to your openai compatible endpoint
-                "api_base": os.environ.get("API_BASE", "https://easyone.eqing.tech/v1"),
-                "api_key": os.environ.get("API_KEY", "<KEY>"),
-            })
             start_time = time.time()
             litellm_response = litellm.completion(**litellm_request)
             logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")

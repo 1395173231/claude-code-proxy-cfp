@@ -228,18 +228,3 @@ def adapt_response_from_cfp(resp: Any, cfp_used: bool):
 
     return resp
 
-
-if __name__ == "__main__":
-    text = """
-    I can see that the `api_base` is currently hardcoded to `"https://easyone.eqing.tech/v1"` on lines 1198 and 1220. I'll modify the code to use an environment variable instead.
-
-<cfp>{"role":"call","id":"1","name":"Edit","args":{"file_path":"E:\\Workspace\\claude-code-openai\\server.py","old_string":"# Get API keys from environment\nANTHROPIC_API_KEY = os.environ.get(\"ANTHROPIC_API_KEY\")\nOPENAI_API_KEY = os.environ.get(\"OPENAI_API_KEY\")\nGEMINI_API_KEY = os.environ.get(\"GEMINI_API_KEY\")\n\n# Get preferred provider (default to openai)\nPREFERRED_PROVIDER = os.environ.get(\"PREFERRED_PROVIDER\", \"openai\").lower()","new_string":"# Get API keys from environment\nANTHROPIC_API_KEY = os.environ.get(\"ANTHROPIC_API_KEY\")\nOPENAI_API_KEY = os.environ.get(\"OPENAI_API_KEY\")\nGEMINI_API_KEY = os.environ.get(\"GEMINI_API_KEY\")\n\n# Get API base URL from environment (default to hardcoded value for backward compatibility)\nAPI_BASE_URL = os.environ.get(\"API_BASE_URL\", \"https://easyone.eqing.tech/v1\")\n\n# Get preferred provider (default to openai)\nPREFERRED_PROVIDER = os.environ.get(\"PREFERRED_PROVIDER\", \"openai\").lower()"}}]</cfp>
-
-<cfp>{"role":"call","id":"2","name":"Edit","args":{"file_path":"E:\\Workspace\\claude-code-openai\\server.py","old_string":"            # Ensure we use the async version for streaming\n            litellm_request.update({\n                \"api_base\": \"https://easyone.eqing.tech/v1\",\n            })","new_string":"            # Ensure we use the async version for streaming\n            litellm_request.update({\n                \"api_base\": API_BASE_URL,\n            })"}}]</cfp>
-
-<cfp>{"role":"call","id":"3","name":"Edit","args":{"file_path":"E:\\Workspace\\claude-code-openai\\server.py","old_string":"            litellm_request.update({\n                # api key to your openai compatible endpoint\n                \"api_base\": \"https://easyone.eqing.tech/v1\",\n            })","new_string":"            litellm_request.update({\n                # api key to your openai compatible endpoint\n                \"api_base\": API_BASE_URL,\n            })"}}]</cfp>
-
-现在 `api_base` 已经修改为使用环境变量 `API_BASE_URL` 读取。如果环境变量没有设置，会使用默认值 `"https://easyone.eqing.tech/v1"` 保持向后兼容性。
-    """
-    text, tool_calls = parse_cfp_response(text)
-    print(tool_calls)
