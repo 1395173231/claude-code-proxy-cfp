@@ -11,10 +11,8 @@ import litellm
 import uuid
 import time
 from dotenv import load_dotenv
-import re
-from datetime import datetime
-import sys
-
+from cfp_adapter import build_cfp_messages, adapt_request_for_cfp, adapt_response_from_cfp, parse_cfp_response
+# litellm._turn_on_debug()
 # Load environment variables from .env file
 load_dotenv()
 
@@ -103,13 +101,22 @@ OPENAI_MODELS = [
     "gpt-4o-mini",
     "gpt-4o-mini-audio-preview",
     "gpt-4.1",  # Added default big model
-    "gpt-4.1-mini" # Added default small model
+    "gpt-4.1-mini", # Added default small model
+    "kimi-k2-0711-preview",
+    "moonshot-v1-32k",
+    "claude-3.7-sonnet",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "claude-4-sonnet",
+    "gpt-4o-all",
+    "o3",
+    "o4-mini"
 ]
 
 # List of Gemini models
 GEMINI_MODELS = [
     "gemini-2.5-pro-preview-03-25",
-    "gemini-2.0-flash"
+    "gemini-2.0-flash",
 ]
 
 # Helper function to clean schema for Gemini
@@ -160,7 +167,7 @@ class SystemContent(BaseModel):
     text: str
 
 class Message(BaseModel):
-    role: Literal["user", "assistant"] 
+    role: Literal["user", "assistant","system"]
     content: Union[str, List[Union[ContentBlockText, ContentBlockImage, ContentBlockToolUse, ContentBlockToolResult]]]
 
 class Tool(BaseModel):
@@ -170,6 +177,7 @@ class Tool(BaseModel):
 
 class ThinkingConfig(BaseModel):
     enabled: bool
+
 
 class MessagesRequest(BaseModel):
     model: str
@@ -186,13 +194,15 @@ class MessagesRequest(BaseModel):
     tool_choice: Optional[Dict[str, Any]] = None
     thinking: Optional[ThinkingConfig] = None
     original_model: Optional[str] = None  # Will store the original model name
-    
-    @field_validator('model')
-    def validate_model_field(cls, v, info): # Renamed to avoid conflict
-        original_model = v
-        new_model = v # Default to original value
+    _cfp_enabled: Optional[bool] = False  # Track if CFP is enabled for this model
 
-        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
+    @field_validator('model')
+    def validate_model_field(cls, v, info):
+        original_model = v
+        new_model = v  # Default to original value
+
+        logger.debug(
+            f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -203,50 +213,71 @@ class MessagesRequest(BaseModel):
         elif clean_v.startswith('gemini/'):
             clean_v = clean_v[7:]
 
-        # --- Mapping Logic --- START ---
+        # --- Simplified Mapping Logic --- START ---
         mapped = False
-        # Map Haiku to SMALL_MODEL based on provider preference
+
+        # Map Haiku to SMALL_MODEL
         if 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
-                mapped = True
+            # If SMALL_MODEL already has a provider prefix, use it directly
+            if SMALL_MODEL.startswith(('openai/', 'gemini/', 'anthropic/')):
+                new_model = SMALL_MODEL
             else:
-                new_model = f"openai/{SMALL_MODEL}"
-                mapped = True
+                # Otherwise, use PREFERRED_PROVIDER logic
+                if PREFERRED_PROVIDER in ["google", "gemini"]:
+                    new_model = f"gemini/{SMALL_MODEL}"
+                elif PREFERRED_PROVIDER == "anthropic":
+                    new_model = f"anthropic/{SMALL_MODEL}"
+                else:
+                    new_model = f"openai/{SMALL_MODEL}"
+            mapped = True
 
-        # Map Sonnet to BIG_MODEL based on provider preference
+        # Map Sonnet to BIG_MODEL
         elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
-                mapped = True
+            # If BIG_MODEL already has a provider prefix, use it directly
+            if BIG_MODEL.startswith(('openai/', 'gemini/', 'anthropic/')):
+                new_model = BIG_MODEL
             else:
-                new_model = f"openai/{BIG_MODEL}"
-                mapped = True
+                # Otherwise, use PREFERRED_PROVIDER logic
+                if PREFERRED_PROVIDER in ["google", "gemini"]:
+                    new_model = f"gemini/{BIG_MODEL}"
+                elif PREFERRED_PROVIDER == "anthropic":
+                    new_model = f"anthropic/{BIG_MODEL}"
+                else:
+                    new_model = f"openai/{BIG_MODEL}"
+            mapped = True
 
-        # Add prefixes to non-mapped models if they match known lists
+        # Add prefixes based on PREFERRED_PROVIDER if no specific mapping
         elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
-                new_model = f"gemini/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
-                new_model = f"openai/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-        # --- Mapping Logic --- END ---
+            if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
+                if PREFERRED_PROVIDER in ["google", "gemini"]:
+                    new_model = f"gemini/{clean_v}"
+                elif PREFERRED_PROVIDER == "anthropic":
+                    new_model = f"anthropic/{clean_v}"
+                else:  # Default to openai
+                    new_model = f"openai/{clean_v}"
+                mapped = True
+        # --- Simplified Mapping Logic --- END ---
 
         if mapped:
             logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
         else:
-             # If no mapping occurred and no prefix exists, log warning or decide default
-             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
-                 logger.warning(f"⚠️ No prefix or mapping rule for model: '{original_model}'. Using as is.")
-             new_model = v # Ensure we return the original if no rule applied
+            logger.debug(f"📌 MODEL: No mapping needed for '{original_model}'")
 
-        # Store the original model in the values dictionary
+        # Check if model has CFP-enabled flags (-textonly, -cfp, -text)
+        cfp_enabled = any(suffix in new_model for suffix in ['-textonly', '-cfp', '-text'])
+        if cfp_enabled:
+            # Remove the CFP flag from the model name for actual API call
+            for suffix in ['-textonly', '-cfp', '-text']:
+                new_model = new_model.replace(suffix, '')
+
+        # Store the original model and CFP status in the values dictionary
         values = info.data
         if isinstance(values, dict):
             values['original_model'] = original_model
+            values['_cfp_enabled'] = cfp_enabled
 
         return new_model
+
 
 class TokenCountRequest(BaseModel):
     model: str
@@ -256,16 +287,15 @@ class TokenCountRequest(BaseModel):
     thinking: Optional[ThinkingConfig] = None
     tool_choice: Optional[Dict[str, Any]] = None
     original_model: Optional[str] = None  # Will store the original model name
-    
-    @field_validator('model')
-    def validate_model_token_count(cls, v, info): # Renamed to avoid conflict
-        # Use the same logic as MessagesRequest validator
-        # NOTE: Pydantic validators might not share state easily if not class methods
-        # Re-implementing the logic here for clarity, could be refactored
-        original_model = v
-        new_model = v # Default to original value
+    _cfp_enabled: Optional[bool] = False  # Track if CFP is enabled for this model
 
-        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
+    @field_validator('model')
+    def validate_model_token_count(cls, v, info):
+        original_model = v
+        new_model = v  # Default to original value
+
+        logger.debug(
+            f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -276,49 +306,71 @@ class TokenCountRequest(BaseModel):
         elif clean_v.startswith('gemini/'):
             clean_v = clean_v[7:]
 
-        # --- Mapping Logic --- START ---
+        # --- Simplified Mapping Logic --- START ---
         mapped = False
-        # Map Haiku to SMALL_MODEL based on provider preference
+
+        # Map Haiku to SMALL_MODEL
         if 'haiku' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and SMALL_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{SMALL_MODEL}"
-                mapped = True
+            # If SMALL_MODEL already has a provider prefix, use it directly
+            if SMALL_MODEL.startswith(('openai/', 'gemini/', 'anthropic/')):
+                new_model = SMALL_MODEL
             else:
-                new_model = f"openai/{SMALL_MODEL}"
-                mapped = True
+                # Otherwise, use PREFERRED_PROVIDER logic
+                if PREFERRED_PROVIDER in ["google", "gemini"]:
+                    new_model = f"gemini/{SMALL_MODEL}"
+                elif PREFERRED_PROVIDER == "anthropic":
+                    new_model = f"anthropic/{SMALL_MODEL}"
+                else:
+                    new_model = f"openai/{SMALL_MODEL}"
+            mapped = True
 
-        # Map Sonnet to BIG_MODEL based on provider preference
+        # Map Sonnet to BIG_MODEL
         elif 'sonnet' in clean_v.lower():
-            if PREFERRED_PROVIDER == "google" and BIG_MODEL in GEMINI_MODELS:
-                new_model = f"gemini/{BIG_MODEL}"
-                mapped = True
+            # If BIG_MODEL already has a provider prefix, use it directly
+            if BIG_MODEL.startswith(('openai/', 'gemini/', 'anthropic/')):
+                new_model = BIG_MODEL
             else:
-                new_model = f"openai/{BIG_MODEL}"
-                mapped = True
+                # Otherwise, use PREFERRED_PROVIDER logic
+                if PREFERRED_PROVIDER in ["google", "gemini"]:
+                    new_model = f"gemini/{BIG_MODEL}"
+                elif PREFERRED_PROVIDER == "anthropic":
+                    new_model = f"anthropic/{BIG_MODEL}"
+                else:
+                    new_model = f"openai/{BIG_MODEL}"
+            mapped = True
 
-        # Add prefixes to non-mapped models if they match known lists
+        # Add prefixes based on PREFERRED_PROVIDER if no specific mapping
         elif not mapped:
-            if clean_v in GEMINI_MODELS and not v.startswith('gemini/'):
-                new_model = f"gemini/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-            elif clean_v in OPENAI_MODELS and not v.startswith('openai/'):
-                new_model = f"openai/{clean_v}"
-                mapped = True # Technically mapped to add prefix
-        # --- Mapping Logic --- END ---
+            if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
+                if PREFERRED_PROVIDER in ["google", "gemini"]:
+                    new_model = f"gemini/{clean_v}"
+                elif PREFERRED_PROVIDER == "anthropic":
+                    new_model = f"anthropic/{clean_v}"
+                else:  # Default to openai
+                    new_model = f"openai/{clean_v}"
+                mapped = True
+        # --- Simplified Mapping Logic --- END ---
 
         if mapped:
             logger.debug(f"📌 TOKEN COUNT MAPPING: '{original_model}' ➡️ '{new_model}'")
         else:
-             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
-                 logger.warning(f"⚠️ No prefix or mapping rule for token count model: '{original_model}'. Using as is.")
-             new_model = v # Ensure we return the original if no rule applied
+            logger.debug(f"📌 TOKEN COUNT: No mapping needed for '{original_model}'")
 
-        # Store the original model in the values dictionary
+        # Check if model has CFP-enabled flags (-textonly, -cfp, -text)
+        cfp_enabled = any(suffix in new_model for suffix in ['-textonly', '-cfp', '-text'])
+        if cfp_enabled:
+            # Remove the CFP flag from the model name for actual API call
+            for suffix in ['-textonly', '-cfp', '-text']:
+                new_model = new_model.replace(suffix, '')
+
+        # Store the original model and CFP status in the values dictionary
         values = info.data
         if isinstance(values, dict):
             values['original_model'] = original_model
+            values['_cfp_enabled'] = cfp_enabled
 
         return new_model
+
 
 class TokenCountResponse(BaseModel):
     input_tokens: int
@@ -675,86 +727,89 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         if content_text is not None and content_text != "":
             content.append({"type": "text", "text": content_text})
         
-        # Add tool calls if present (tool_use in Anthropic format) - only for Claude models
-        if tool_calls and is_claude_model:
-            logger.debug(f"Processing tool calls: {tool_calls}")
-            
-            # Convert to list if it's not already
-            if not isinstance(tool_calls, list):
-                tool_calls = [tool_calls]
-                
-            for idx, tool_call in enumerate(tool_calls):
-                logger.debug(f"Processing tool call {idx}: {tool_call}")
-                
-                # Extract function data based on whether it's a dict or object
-                if isinstance(tool_call, dict):
-                    function = tool_call.get("function", {})
-                    tool_id = tool_call.get("id", f"tool_{uuid.uuid4()}")
-                    name = function.get("name", "")
-                    arguments = function.get("arguments", "{}")
-                else:
-                    function = getattr(tool_call, "function", None)
-                    tool_id = getattr(tool_call, "id", f"tool_{uuid.uuid4()}")
-                    name = getattr(function, "name", "") if function else ""
-                    arguments = getattr(function, "arguments", "{}") if function else "{}"
-                
-                # Convert string arguments to dict if needed
-                if isinstance(arguments, str):
+        # Add tool calls if present (tool_use in Anthropic format)
+        if tool_calls:
+            # --- 新增：CFP 路径下所有模型都输出 tool_use 块 ---
+            if getattr(litellm_response, "_from_cfp", False):
+                logger.debug("CFP tool_calls ➜ Anthropic tool_use (all models)")
+                if not isinstance(tool_calls, list):
+                    tool_calls = [tool_calls]
+                for tc in tool_calls:
+                    fn  = tc.get("function", {})
+                    args = fn.get("arguments", "{}")
+                    # 解析字符串 JSON
                     try:
-                        arguments = json.loads(arguments)
+                        args = json.loads(args) if isinstance(args, str) else args
                     except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse tool arguments as JSON: {arguments}")
-                        arguments = {"raw": arguments}
-                
-                logger.debug(f"Adding tool_use block: id={tool_id}, name={name}, input={arguments}")
-                
-                content.append({
-                    "type": "tool_use",
-                    "id": tool_id,
-                    "name": name,
-                    "input": arguments
-                })
-        elif tool_calls and not is_claude_model:
-            # For non-Claude models, convert tool calls to text format
-            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_model}")
-            
-            # We'll append tool info to the text content
-            tool_text = "\n\nTool usage:\n"
-            
-            # Convert to list if it's not already
-            if not isinstance(tool_calls, list):
-                tool_calls = [tool_calls]
-                
-            for idx, tool_call in enumerate(tool_calls):
-                # Extract function data based on whether it's a dict or object
-                if isinstance(tool_call, dict):
-                    function = tool_call.get("function", {})
-                    tool_id = tool_call.get("id", f"tool_{uuid.uuid4()}")
-                    name = function.get("name", "")
-                    arguments = function.get("arguments", "{}")
-                else:
-                    function = getattr(tool_call, "function", None)
-                    tool_id = getattr(tool_call, "id", f"tool_{uuid.uuid4()}")
-                    name = getattr(function, "name", "") if function else ""
-                    arguments = getattr(function, "arguments", "{}") if function else "{}"
-                
-                # Convert string arguments to dict if needed
-                if isinstance(arguments, str):
-                    try:
-                        args_dict = json.loads(arguments)
-                        arguments_str = json.dumps(args_dict, indent=2)
-                    except json.JSONDecodeError:
-                        arguments_str = arguments
-                else:
-                    arguments_str = json.dumps(arguments, indent=2)
-                
-                tool_text += f"Tool: {name}\nArguments: {arguments_str}\n\n"
-            
-            # Add or append tool text to content
-            if content and content[0]["type"] == "text":
-                content[0]["text"] += tool_text
+                        args = {"raw": args}
+                    content.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", f"tool_{uuid.uuid4()}"),
+                        "name": fn.get("name", ""),
+                        "input": args
+                    })
+                # 让 stop_reason 成为 "tool_use"
+                if finish_reason == "tool_calls":
+                    finish_reason = "tool_use"
+            # --- 旧逻辑：仅 Claude 输出 tool_use，其它降级为文本 ---
+            elif is_claude_model:
+                logger.debug(f"Processing tool calls: {tool_calls}")
+                if not isinstance(tool_calls, list):
+                    tool_calls = [tool_calls]
+                for idx, tool_call in enumerate(tool_calls):
+                    logger.debug(f"Processing tool call {idx}: {tool_call}")
+                    if isinstance(tool_call, dict):
+                        function = tool_call.get("function", {})
+                        tool_id = tool_call.get("id", f"tool_{uuid.uuid4()}")
+                        name = function.get("name", "")
+                        arguments = function.get("arguments", "{}")
+                    else:
+                        function = getattr(tool_call, "function", None)
+                        tool_id = getattr(tool_call, "id", f"tool_{uuid.uuid4()}")
+                        name = getattr(function, "name", "") if function else ""
+                        arguments = getattr(function, "arguments", "{}") if function else "{}"
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse tool arguments as JSON: {arguments}")
+                            arguments = {"raw": arguments}
+                    logger.debug(f"Adding tool_use block: id={tool_id}, name={name}, input={arguments}")
+                    content.append({
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": name,
+                        "input": arguments
+                    })
             else:
-                content.append({"type": "text", "text": tool_text})
+                # For non-Claude models, convert tool calls to text format
+                logger.debug(f"Converting tool calls to text for non-Claude model: {clean_model}")
+                tool_text = "\n\nTool usage:\n"
+                if not isinstance(tool_calls, list):
+                    tool_calls = [tool_calls]
+                for idx, tool_call in enumerate(tool_calls):
+                    if isinstance(tool_call, dict):
+                        function = tool_call.get("function", {})
+                        tool_id = tool_call.get("id", f"tool_{uuid.uuid4()}")
+                        name = function.get("name", "")
+                        arguments = function.get("arguments", "{}")
+                    else:
+                        function = getattr(tool_call, "function", None)
+                        tool_id = getattr(tool_call, "id", f"tool_{uuid.uuid4()}")
+                        name = getattr(function, "name", "") if function else ""
+                        arguments = getattr(function, "arguments", "{}") if function else "{}"
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse tool arguments as JSON: {arguments}")
+                            arguments = {"raw": arguments}
+                    arguments_str = json.dumps(arguments, indent=2)
+                    tool_text += f"Tool: {name}\nArguments: {arguments_str}\n\n"
+                if content and content[0]["type"] == "text":
+                    content[0]["text"] += tool_text
+                else:
+                    content.append({"type": "text", "text": tool_text})
         
         # Get usage information - extract values safely from object or dict
         if isinstance(usage_info, dict):
@@ -811,12 +866,13 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
             usage=Usage(input_tokens=0, output_tokens=0)
         )
 
-async def handle_streaming(response_generator, original_request: MessagesRequest):
+
+async def handle_streaming(response_generator, original_request: MessagesRequest, cfp_used: bool = False):
     """Handle streaming responses from LiteLLM and convert to Anthropic format."""
+    import json
     try:
-        # Send message_start event
-        message_id = f"msg_{uuid.uuid4().hex[:24]}"  # Format similar to Anthropic's IDs
-        
+        import uuid
+        message_id = f"msg_{uuid.uuid4().hex[:24]}"
         message_data = {
             'type': 'message_start',
             'message': {
@@ -836,242 +892,136 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
             }
         }
         yield f"event: message_start\ndata: {json.dumps(message_data)}\n\n"
-        
-        # Content block index for the first text block
-        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-        
-        # Send a ping to keep the connection alive (Anthropic does this)
-        yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
-        
+
         tool_index = None
         current_tool_call = None
         tool_content = ""
-        accumulated_text = ""  # Track accumulated text content
-        text_sent = False  # Track if we've sent any text content
-        text_block_closed = False  # Track if text block is closed
+        accumulated_text = ""
+        text_sent = False
+        text_block_closed = False
         input_tokens = 0
         output_tokens = 0
         has_sent_stop_reason = False
         last_tool_index = 0
-        
-        # Process each chunk
+        cfp_buffer = ""
+        cfp_text_sent = False
+        cfp_tool_processed = False
+        text_block_started = False
+
         async for chunk in response_generator:
             try:
-
-                
-                # Check if this is the end of the response with usage data
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
                     if hasattr(chunk.usage, 'prompt_tokens'):
                         input_tokens = chunk.usage.prompt_tokens
                     if hasattr(chunk.usage, 'completion_tokens'):
                         output_tokens = chunk.usage.completion_tokens
-                
-                # Handle text content
+
                 if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
                     choice = chunk.choices[0]
-                    
-                    # Get the delta from the choice
                     if hasattr(choice, 'delta'):
                         delta = choice.delta
                     else:
-                        # If no delta, try to get message
                         delta = getattr(choice, 'message', {})
-                    
-                    # Check for finish_reason to know when we're done
                     finish_reason = getattr(choice, 'finish_reason', None)
-                    
-                    # Process text content
+
                     delta_content = None
-                    
-                    # Handle different formats of delta content
                     if hasattr(delta, 'content'):
                         delta_content = delta.content
                     elif isinstance(delta, dict) and 'content' in delta:
                         delta_content = delta['content']
-                    
-                    # Accumulate text content
-                    if delta_content is not None and delta_content != "":
+
+                    # ============ CFP 模式处理 ============
+                    if cfp_used and delta_content is not None and delta_content != "":
+                        cfp_buffer += delta_content
                         accumulated_text += delta_content
-                        
-                        # Always emit text deltas if no tool calls started
+
+                        # 检测 CFP 工具调用
+                        if not cfp_tool_processed:
+                            try:
+                                plain_text, tool_calls = parse_cfp_response(cfp_buffer)
+                                if tool_calls:
+                                    cfp_tool_processed = True
+                                    # 输出 tool_use 块
+                                    for tc in tool_calls:
+                                        last_tool_index += 1
+                                        fn = tc.get("function", {})
+                                        args = fn.get("arguments", "{}")
+                                        try:
+                                            args_dict = json.loads(args) if isinstance(args, str) else args
+                                        except json.JSONDecodeError:
+                                            args_dict = {"raw": args}
+                                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': last_tool_index, 'content_block': {'type': 'tool_use', 'id': tc.get('id', f'toolu_{uuid.uuid4().hex[:24]}'), 'name': fn.get('name', ''), 'input': {}}})}\n\n"
+                                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': last_tool_index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(args_dict)}})}\n\n"
+                                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': last_tool_index})}\n\n"
+                                    finish_reason = "tool_calls"
+                            except Exception as cfp_error:
+                                pass
+
+                    # ============ 非 CFP 模式处理 ============
+                    elif not cfp_used and delta_content is not None and delta_content != "":
+                        accumulated_text += delta_content
                         if tool_index is None and not text_block_closed:
+                            if not text_block_started:
+                                text_block_started = True
+                                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
                             text_sent = True
                             yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta_content}})}\n\n"
-                    
-                    # Process tool calls
-                    delta_tool_calls = None
-                    
-                    # Handle different formats of tool calls
-                    if hasattr(delta, 'tool_calls'):
-                        delta_tool_calls = delta.tool_calls
-                    elif isinstance(delta, dict) and 'tool_calls' in delta:
-                        delta_tool_calls = delta['tool_calls']
-                    
-                    # Process tool calls if any
-                    if delta_tool_calls:
-                        # First tool call we've seen - need to handle text properly
-                        if tool_index is None:
-                            # If we've been streaming text, close that text block
-                            if text_sent and not text_block_closed:
-                                text_block_closed = True
-                                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                            # If we've accumulated text but not sent it, we need to emit it now
-                            # This handles the case where the first delta has both text and a tool call
-                            elif accumulated_text and not text_sent and not text_block_closed:
-                                # Send the accumulated text
-                                text_sent = True
-                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': accumulated_text}})}\n\n"
-                                # Close the text block
-                                text_block_closed = True
-                                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                            # Close text block even if we haven't sent anything - models sometimes emit empty text blocks
-                            elif not text_block_closed:
-                                text_block_closed = True
-                                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                                
-                        # Convert to list if it's not already
-                        if not isinstance(delta_tool_calls, list):
-                            delta_tool_calls = [delta_tool_calls]
-                        
-                        for tool_call in delta_tool_calls:
-                            # Get the index of this tool call (for multiple tools)
-                            current_index = None
-                            if isinstance(tool_call, dict) and 'index' in tool_call:
-                                current_index = tool_call['index']
-                            elif hasattr(tool_call, 'index'):
-                                current_index = tool_call.index
-                            else:
-                                current_index = 0
-                            
-                            # Check if this is a new tool or a continuation
-                            if tool_index is None or current_index != tool_index:
-                                # New tool call - create a new tool_use block
-                                tool_index = current_index
-                                last_tool_index += 1
-                                anthropic_tool_index = last_tool_index
-                                
-                                # Extract function info
-                                if isinstance(tool_call, dict):
-                                    function = tool_call.get('function', {})
-                                    name = function.get('name', '') if isinstance(function, dict) else ""
-                                    tool_id = tool_call.get('id', f"toolu_{uuid.uuid4().hex[:24]}")
-                                else:
-                                    function = getattr(tool_call, 'function', None)
-                                    name = getattr(function, 'name', '') if function else ''
-                                    tool_id = getattr(tool_call, 'id', f"toolu_{uuid.uuid4().hex[:24]}")
-                                
-                                # Start a new tool_use block
-                                yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': anthropic_tool_index, 'content_block': {'type': 'tool_use', 'id': tool_id, 'name': name, 'input': {}}})}\n\n"
-                                current_tool_call = tool_call
-                                tool_content = ""
-                            
-                            # Extract function arguments
-                            arguments = None
-                            if isinstance(tool_call, dict) and 'function' in tool_call:
-                                function = tool_call.get('function', {})
-                                arguments = function.get('arguments', '') if isinstance(function, dict) else ''
-                            elif hasattr(tool_call, 'function'):
-                                function = getattr(tool_call, 'function', None)
-                                arguments = getattr(function, 'arguments', '') if function else ''
-                            
-                            # If we have arguments, send them as a delta
-                            if arguments:
-                                # Try to detect if arguments are valid JSON or just a fragment
-                                try:
-                                    # If it's already a dict, use it
-                                    if isinstance(arguments, dict):
-                                        args_json = json.dumps(arguments)
-                                    else:
-                                        # Otherwise, try to parse it
-                                        json.loads(arguments)
-                                        args_json = arguments
-                                except (json.JSONDecodeError, TypeError):
-                                    # If it's a fragment, treat it as a string
-                                    args_json = arguments
-                                
-                                # Add to accumulated tool content
-                                tool_content += args_json if isinstance(args_json, str) else ""
-                                
-                                # Send the update
-                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': anthropic_tool_index, 'delta': {'type': 'input_json_delta', 'partial_json': args_json}})}\n\n"
-                    
-                    # Process finish_reason - end the streaming response
+
+                    # ============ 处理完成原因 ============
                     if finish_reason and not has_sent_stop_reason:
                         has_sent_stop_reason = True
-                        
-                        # Close any open tool call blocks
-                        if tool_index is not None:
-                            for i in range(1, last_tool_index + 1):
-                                yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': i})}\n\n"
-                        
-                        # If we accumulated text but never sent or closed text block, do it now
-                        if not text_block_closed:
-                            if accumulated_text and not text_sent:
-                                # Send the accumulated text
-                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': accumulated_text}})}\n\n"
-                            # Close the text block
+
+                        # CFP 模式下，如果没有检测到工具调用，则输出纯文本
+                        if cfp_used and not cfp_tool_processed and accumulated_text.strip():
+                            try:
+                                plain_text, _ = parse_cfp_response(accumulated_text)
+                                if plain_text and plain_text.strip():
+                                    if not text_block_started:
+                                        text_block_started = True
+                                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': plain_text}})}\n\n"
+                                    text_sent = True
+                            except Exception:
+                                # 如果解析失败，输出原始文本
+                                if accumulated_text.strip():
+                                    if not text_block_started:
+                                        text_block_started = True
+                                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': accumulated_text}})}\n\n"
+                                    text_sent = True
+
+                        # 关闭文本块
+                        if text_sent and not text_block_closed:
+                            text_block_closed = True
                             yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-                        
-                        # Map OpenAI finish_reason to Anthropic stop_reason
+
                         stop_reason = "end_turn"
                         if finish_reason == "length":
                             stop_reason = "max_tokens"
-                        elif finish_reason == "tool_calls":
+                        elif finish_reason == "tool_calls" or cfp_tool_processed:
                             stop_reason = "tool_use"
                         elif finish_reason == "stop":
                             stop_reason = "end_turn"
-                        
-                        # Send message_delta with stop reason and usage
+
                         usage = {"output_tokens": output_tokens}
-                        
                         yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': usage})}\n\n"
-                        
-                        # Send message_stop event
                         yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
-                        
-                        # Send final [DONE] marker to match Anthropic's behavior
                         yield "data: [DONE]\n\n"
                         return
+
             except Exception as e:
-                # Log error but continue processing other chunks
                 logger.error(f"Error processing chunk: {str(e)}")
                 continue
-        
-        # If we didn't get a finish reason, close any open blocks
-        if not has_sent_stop_reason:
-            # Close any open tool call blocks
-            if tool_index is not None:
-                for i in range(1, last_tool_index + 1):
-                    yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': i})}\n\n"
-            
-            # Close the text content block
-            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-            
-            # Send final message_delta with usage
-            usage = {"output_tokens": output_tokens}
-            
-            yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': usage})}\n\n"
-            
-            # Send message_stop event
-            yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
-            
-            # Send final [DONE] marker to match Anthropic's behavior
-            yield "data: [DONE]\n\n"
-    
+
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
         error_message = f"Error in streaming: {str(e)}\n\nFull traceback:\n{error_traceback}"
         logger.error(error_message)
-        
-        # Send error message_delta
         yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'error', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
-        
-        # Send message_stop event
         yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
-        
-        # Send final [DONE] marker
         yield "data: [DONE]\n\n"
+
 
 @app.post("/v1/messages")
 async def create_message(
@@ -1079,28 +1029,20 @@ async def create_message(
     raw_request: Request
 ):
     try:
-        # print the body here
         body = await raw_request.body()
-    
-        # Parse the raw body as JSON since it's bytes
         body_json = json.loads(body.decode('utf-8'))
         original_model = body_json.get("model", "unknown")
-        
-        # Get the display name for logging, just the model name without provider prefix
         display_model = original_model
         if "/" in display_model:
             display_model = display_model.split("/")[-1]
-        
-        # Clean model name for capability check
         clean_model = request.model
         if clean_model.startswith("anthropic/"):
             clean_model = clean_model[len("anthropic/"):]
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
-        
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
-        
-        # Convert Anthropic request to LiteLLM format
+
+        # 原有逻辑
         litellm_request = convert_anthropic_to_litellm(request)
         
         # Determine which API key to use based on the model
@@ -1251,7 +1193,15 @@ async def create_message(
                 elif msg.get("content") is None:
                     logger.warning(f"Message {i} has None content - replacing with placeholder")
                     litellm_request["messages"][i]["content"] = "..." # Fallback placeholder
-        
+
+        # ---------- CFP 请求适配 ----------
+        # Use per-model CFP configuration instead of global setting
+        cfp_enabled = getattr(request, '_cfp_enabled', False)
+        if cfp_enabled:
+            # Use CFP adaptation for models with CFP-enabled flags
+            litellm_request, _cfp_used = adapt_request_for_cfp(litellm_request, cfp_enabled)
+        else:
+            _cfp_used = False
         # Only log basic info about the request, not the full details
         logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
         
@@ -1270,16 +1220,19 @@ async def create_message(
                 200  # Assuming success at this point
             )
             # Ensure we use the async version for streaming
+            litellm_request.update({
+                "api_base": os.environ.get("API_BASE", "https://easyone.eqing.tech/v1"),
+                "api_key": os.environ.get("API_KEY", "<KEY>"),
+            })
             response_generator = await litellm.acompletion(**litellm_request)
             
             return StreamingResponse(
-                handle_streaming(response_generator, request),
+                handle_streaming(response_generator, request, cfp_used=_cfp_used),
                 media_type="text/event-stream"
             )
         else:
             # Use LiteLLM for regular completion
             num_tools = len(request.tools) if request.tools else 0
-            
             log_request_beautifully(
                 "POST", 
                 raw_request.url.path, 
@@ -1289,15 +1242,21 @@ async def create_message(
                 num_tools,
                 200  # Assuming success at this point
             )
+            litellm_request.update({
+                # api key to your openai compatible endpoint
+                "api_base": os.environ.get("API_BASE", "https://easyone.eqing.tech/v1"),
+                "api_key": os.environ.get("API_KEY", "<KEY>"),
+            })
             start_time = time.time()
             litellm_response = litellm.completion(**litellm_request)
             logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
-            
+
+            # ---------- CFP 响应适配 ----------
+            litellm_response = adapt_response_from_cfp(litellm_response, _cfp_used)
+
             # Convert LiteLLM response to Anthropic format
             anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
-            
             return anthropic_response
-                
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
@@ -1321,7 +1280,7 @@ async def create_message(
                     error_details[key] = str(value)
         
         # Log all error details
-        logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
+        logger.error(f"Error processing request: {str(e)}")
         
         # Format error for response
         error_message = f"Error: {str(e)}"

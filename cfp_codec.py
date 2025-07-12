@@ -1,5 +1,6 @@
 import json, re, uuid
 from typing import Dict, Any
+import json_repair
 
 TAG_OPEN = "<cfp>"
 TAG_CLOSE = "</cfp>"
@@ -44,5 +45,7 @@ def extract_blocks(txt: str) -> list[str]:
 
 
 def parse_block(raw: str) -> dict:
-    doc = json.loads(raw)
+    doc = json_repair.loads(raw)
     return doc
+
+

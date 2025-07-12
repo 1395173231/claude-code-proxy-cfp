@@ -44,23 +44,9 @@ def normalize_model_name(model_name: str) -> str:
 
 # 简化后的 CFP 指导和示例
 CFP_GUIDE = """You follow the Chat-Function-Protocol (CFP).
-When you need to call a function, output ONLY in this exact format:
-<cfp>{"role":"call","id":"$UUID","name":"$FUNCTION_NAME","args":$ARGUMENTS}</cfp>
-
-After receiving a function result, think and reply normally.
-
-Examples:
-User: What's the weather in Beijing?
-Assistant: <cfp>{"role":"call","id":"12345","name":"get_weather","args":{"location":"Beijing"}}</cfp>
-
-User: <cfp>{"role":"result","id":"12345","result":{"temperature":25,"condition":"sunny"}}</cfp>
-Assistant: The weather in Beijing is currently 25°C and sunny.
-
-User: Calculate 15 * 23
-Assistant: <cfp>{"role":"call","id":"67890","name":"calculate","args":{"expression":"15 * 23"}}</cfp>
-
-User: <cfp>{"role":"result","id":"67890","result":345}</cfp>
-Assistant: 15 * 23 = 345
+When a tool is required, output ONLY:
+<cfp>{\"role\":\"call\",\"id\":\"$UUID\",\"name\":\"$FUNC\",\"args\":$ARGS}</cfp>
+After you receive a role=\"result\" CFP block, think and reply normally.
 """
 
 
@@ -190,27 +176,31 @@ def parse_cfp_response(text: str) -> Tuple[Optional[str], Optional[list]]:
         blocks = extract_blocks(text)
         if not blocks:
             return text.strip(), None
+        tool_calls = []
+        for block in blocks:
 
-        # 解析 CFP 块
-        cfp_json = json.loads(blocks[0])
+            # 解析 CFP 块
+            cfp_json = parse_block(block)
 
-        if cfp_json["role"] == "call":
-            tool_call = {
-                "id": cfp_json["id"],
-                "type": "function",
-                "function": {
-                    "name": cfp_json["name"],
-                    "arguments": json.dumps(cfp_json["args"], ensure_ascii=False)
+            if cfp_json["role"] == "call":
+                tool_call = {
+                    "id": cfp_json["id"],
+                    "type": "function",
+                    "function": {
+                        "name": cfp_json["name"],
+                        "arguments": json.dumps(cfp_json["args"], ensure_ascii=False)
+                    }
                 }
-            }
-            return None, [tool_call]
+                tool_calls.append(tool_call)
 
-        if cfp_json["role"] == "result":
-            return json.dumps(cfp_json["result"], ensure_ascii=False), None
 
-        if cfp_json["role"] == "error":
-            return f"[CFP error] {cfp_json.get('error', 'Unknown error')}", None
+            if cfp_json["role"] == "result":
+                return json.dumps(cfp_json["result"], ensure_ascii=False), None
 
+            if cfp_json["role"] == "error":
+                return f"[CFP error] {cfp_json.get('error', 'Unknown error')}", None
+        if len(tool_calls) >0 :
+            return None, tool_calls
         return text.strip(), None
     except Exception as e:
         # 如果解析失败，返回原始文本
@@ -237,3 +227,19 @@ def adapt_response_from_cfp(resp: Any, cfp_used: bool):
         msg.content = plain
 
     return resp
+
+
+if __name__ == "__main__":
+    text = """
+    I can see that the `api_base` is currently hardcoded to `"https://easyone.eqing.tech/v1"` on lines 1198 and 1220. I'll modify the code to use an environment variable instead.
+
+<cfp>{"role":"call","id":"1","name":"Edit","args":{"file_path":"E:\\Workspace\\claude-code-openai\\server.py","old_string":"# Get API keys from environment\nANTHROPIC_API_KEY = os.environ.get(\"ANTHROPIC_API_KEY\")\nOPENAI_API_KEY = os.environ.get(\"OPENAI_API_KEY\")\nGEMINI_API_KEY = os.environ.get(\"GEMINI_API_KEY\")\n\n# Get preferred provider (default to openai)\nPREFERRED_PROVIDER = os.environ.get(\"PREFERRED_PROVIDER\", \"openai\").lower()","new_string":"# Get API keys from environment\nANTHROPIC_API_KEY = os.environ.get(\"ANTHROPIC_API_KEY\")\nOPENAI_API_KEY = os.environ.get(\"OPENAI_API_KEY\")\nGEMINI_API_KEY = os.environ.get(\"GEMINI_API_KEY\")\n\n# Get API base URL from environment (default to hardcoded value for backward compatibility)\nAPI_BASE_URL = os.environ.get(\"API_BASE_URL\", \"https://easyone.eqing.tech/v1\")\n\n# Get preferred provider (default to openai)\nPREFERRED_PROVIDER = os.environ.get(\"PREFERRED_PROVIDER\", \"openai\").lower()"}}]</cfp>
+
+<cfp>{"role":"call","id":"2","name":"Edit","args":{"file_path":"E:\\Workspace\\claude-code-openai\\server.py","old_string":"            # Ensure we use the async version for streaming\n            litellm_request.update({\n                \"api_base\": \"https://easyone.eqing.tech/v1\",\n            })","new_string":"            # Ensure we use the async version for streaming\n            litellm_request.update({\n                \"api_base\": API_BASE_URL,\n            })"}}]</cfp>
+
+<cfp>{"role":"call","id":"3","name":"Edit","args":{"file_path":"E:\\Workspace\\claude-code-openai\\server.py","old_string":"            litellm_request.update({\n                # api key to your openai compatible endpoint\n                \"api_base\": \"https://easyone.eqing.tech/v1\",\n            })","new_string":"            litellm_request.update({\n                # api key to your openai compatible endpoint\n                \"api_base\": API_BASE_URL,\n            })"}}]</cfp>
+
+现在 `api_base` 已经修改为使用环境变量 `API_BASE_URL` 读取。如果环境变量没有设置，会使用默认值 `"https://easyone.eqing.tech/v1"` 保持向后兼容性。
+    """
+    text, tool_calls = parse_cfp_response(text)
+    print(tool_calls)
