@@ -10,9 +10,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import litellm
 import uuid
 import time
+import sys
 from dotenv import load_dotenv
 from cfp_adapter import build_cfp_messages, adapt_request_for_cfp, adapt_response_from_cfp, parse_cfp_response
-if os.environ.get("DEBUG").lower() == "true":
+if os.environ.get("DEBUG","").lower() == "true":
     litellm._turn_on_debug()
 # Load environment variables from .env file
 load_dotenv()
@@ -906,12 +907,21 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         last_tool_index = 0
         cfp_buffer = ""
         cfp_text_sent = False
-        cfp_tool_processed = False
         text_block_started = False
+
+        sse_interrupt = True
 
         # 用于跟踪工具调用状态
         tool_calls_in_progress = {}  # {index: {id, name, arguments}}
 
+        # CFP v2 增量解析器 - 修改导入方式
+        from cfp_adapter import CFPStreamParser
+        cfp_parser = CFPStreamParser()
+        cfp_active_calls = {}  # {call_id: {index, anthropic_id, name, arguments_buffer}}
+        cfp_call_index = 0
+        cfp_has_tool_calls = False
+        cfp_text_accumulated = ""
+        finish_reason = "stop"
         async for chunk in response_generator:
             try:
                 if hasattr(chunk, 'usage') and chunk.usage is not None:
@@ -931,6 +941,9 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                     delta_content = None
                     if hasattr(delta, 'content'):
                         delta_content = delta.content
+                        if os.environ.get("DEBUG", "").lower() == "true":  # 修复环境变量检查
+                            with open("data/chunk_old_data.txt", "a", encoding="utf-8") as f:
+                                f.write(delta_content+"\n")
                     elif isinstance(delta, dict) and 'content' in delta:
                         delta_content = delta['content']
 
@@ -991,32 +1004,103 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                         if tool_calls:
                             finish_reason = "tool_use"
 
-                    # ============ CFP 模式处理 ============
                     elif cfp_used and delta_content is not None and delta_content != "":
-                        cfp_buffer += delta_content
                         accumulated_text += delta_content
 
-                        # 检测 CFP 工具调用
-                        if not cfp_tool_processed:
-                            try:
-                                plain_text, tool_calls = parse_cfp_response(cfp_buffer)
-                                if tool_calls:
-                                    cfp_tool_processed = True
-                                    # 输出 tool_use 块
-                                    for tc in tool_calls:
-                                        last_tool_index += 1
-                                        fn = tc.get("function", {})
-                                        args = fn.get("arguments", "{}")
-                                        try:
-                                            args_dict = json.loads(args) if isinstance(args, str) else args
-                                        except json.JSONDecodeError:
-                                            args_dict = {"raw": args}
-                                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': last_tool_index, 'content_block': {'type': 'tool_use', 'id': tc.get('id', f'toolu_{uuid.uuid4().hex[:24]}'), 'name': fn.get('name', ''), 'input': {}}})}\n\n"
-                                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': last_tool_index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(args_dict)}})}\n\n"
-                                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': last_tool_index})}\n\n"
-                                    finish_reason = "tool_calls"
-                            except Exception as cfp_error:
-                                pass
+                        # 使用 CFP v2 解析器处理增量数据
+                        try:
+                            events = cfp_parser.parse_stream_chunk(delta_content)
+
+                            for event in events:
+                                if event["type"] == "call_start":
+                                    # 函数调用开始
+                                    cfp_has_tool_calls = True
+                                    call_id = event["id"]
+                                    function_name = event["name"]
+
+                                    # 确保先关闭文本块
+                                    if text_block_started and not text_block_closed:
+                                        text_block_closed = True
+                                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+
+                                    # 分配新的工具调用索引
+                                    actual_index = cfp_call_index + (1 if text_block_started else 0)
+                                    anthropic_tool_id = f'toolu_{uuid.uuid4().hex[:24]}'
+
+                                    # 记录活跃的调用
+                                    cfp_active_calls[call_id] = {
+                                        'index': actual_index,
+                                        'anthropic_id': anthropic_tool_id,
+                                        'name': function_name,
+                                        'arguments_buffer': "",
+                                        'started': True
+                                    }
+
+                                    # 发送 content_block_start 事件
+                                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': actual_index, 'content_block': {'type': 'tool_use', 'id': anthropic_tool_id, 'name': function_name, 'input': {}}})}\n\n"
+
+                                    cfp_call_index += 1
+
+                                elif event["type"] == "args_delta":
+                                    # 参数增量
+                                    call_id = event["id"]
+                                    delta_args = event["delta"]
+
+                                    if call_id in cfp_active_calls:
+                                        call_info = cfp_active_calls[call_id]
+                                        call_info['arguments_buffer'] += delta_args
+
+                                        # 发送参数增量
+                                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': call_info['index'], 'delta': {'type': 'input_json_delta', 'partial_json': delta_args}})}\n\n"
+
+                                elif event["type"] == "call_complete":
+                                    # 函数调用完成
+                                    call_id = event["id"]
+
+                                    if call_id in cfp_active_calls:
+                                        call_info = cfp_active_calls[call_id]
+
+                                        # 发送 content_block_stop 事件
+                                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': call_info['index']})}\n\n"
+
+                                        # 从活跃调用中移除
+                                        del cfp_active_calls[call_id]
+
+                                elif event["type"] == "text":
+                                    # 处理文本内容
+                                    text_content = event["content"]
+                                    if text_content and not cfp_has_tool_calls:
+                                        cfp_text_accumulated += text_content
+
+                                        if not text_block_started:
+                                            text_block_started = True
+                                            yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+
+                                        yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': text_content}})}\n\n"
+                                        text_sent = True
+
+                                elif event["type"] == "result":
+                                    # 处理函数执行结果
+                                    result_content = json.dumps(event["result"], ensure_ascii=False)
+                                    if not text_block_started:
+                                        text_block_started = True
+                                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': result_content}})}\n\n"
+                                    text_sent = True
+
+                        except Exception as cfp_error:
+                            logger.error(f"CFP parsing error: {cfp_error}")
+                            # CFP 解析失败，累积为文本
+                            if not cfp_has_tool_calls:
+                                cfp_text_accumulated += delta_content
+
+                                if not text_block_started:
+                                    text_block_started = True
+                                    yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+
+                                yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta_content}})}\n\n"
+                                text_sent = True
 
                     # ============ 非 CFP 模式处理普通文本 ============
                     elif not cfp_used and delta_content is not None and delta_content != "" and not tool_calls:
@@ -1038,9 +1122,15 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                                 actual_index = tool_idx + (1 if text_block_started else 0)
                                 yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': actual_index})}\n\n"
 
+                        # 完成所有 CFP 活跃调用
+                        for call_id, call_info in cfp_active_calls.items():
+                            yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': call_info['index']})}\n\n"
+
                         # CFP 模式下，如果没有检测到工具调用，则输出纯文本
-                        if cfp_used and not cfp_tool_processed and accumulated_text.strip():
+                        if cfp_used and not cfp_has_tool_calls and accumulated_text.strip():
                             try:
+                                # 修改为使用 cfp_adapter 的函数
+                                from cfp_adapter import parse_cfp_response
                                 plain_text, _ = parse_cfp_response(accumulated_text)
                                 if plain_text and plain_text.strip():
                                     if not text_block_started:
@@ -1049,12 +1139,14 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                                     yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': plain_text}})}\n\n"
                                     text_sent = True
                             except Exception:
-                                # 如果解析失败，输出原始文本
-                                if accumulated_text.strip():
+                                # 如果解析失败，使用 cfp_codec 清理文本
+                                from cfp_codec import clean_cfp_text
+                                clean_text = clean_cfp_text(accumulated_text)
+                                if clean_text.strip():
                                     if not text_block_started:
                                         text_block_started = True
                                         yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
-                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': accumulated_text}})}\n\n"
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': clean_text}})}\n\n"
                                     text_sent = True
 
                         # 关闭文本块
@@ -1062,10 +1154,10 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                             text_block_closed = True
                             yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
 
-                        stop_reason = "max_tokens"
+                        stop_reason = "end_turn"
                         if finish_reason == "length":
                             stop_reason = "max_tokens"
-                        elif finish_reason == "tool_calls" or cfp_tool_processed or tool_calls_in_progress:
+                        elif finish_reason == "tool_calls" or cfp_has_tool_calls or tool_calls_in_progress:
                             stop_reason = "tool_use"
                         elif finish_reason == "stop":
                             stop_reason = "end_turn"
@@ -1074,12 +1166,27 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                         yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': usage})}\n\n"
                         yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
                         yield "data: [DONE]\n\n"
+                        sse_interrupt = False
                         return
 
             except Exception as e:
                 logger.error(f"Error processing chunk: {str(e)}")
                 continue
 
+        if sse_interrupt:
+            # 上游中断时, 补充完成sse块
+            stop_reason = "end_turn"
+            if finish_reason == "length":
+                stop_reason = "max_tokens"
+            elif finish_reason == "tool_calls" or cfp_has_tool_calls or tool_calls_in_progress:
+                stop_reason = "tool_use"
+            elif finish_reason == "stop":
+                stop_reason = "end_turn"
+            usage = {"output_tokens": output_tokens}
+            yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': usage})}\n\n"
+            yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
     except Exception as e:
         import traceback
         error_traceback = traceback.format_exc()
@@ -1088,7 +1195,6 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'error', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
         yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
         yield "data: [DONE]\n\n"
-
 
 # ========== 新增多渠道配置类 ==========
 class ProviderConfig:
@@ -1478,10 +1584,8 @@ async def count_tokens(
         
         # Clean model name for capability check
         clean_model = request.model
-        if clean_model.startswith("anthropic/"):
-            clean_model = clean_model[len("anthropic/"):]
-        elif clean_model.startswith("openai/"):
-            clean_model = clean_model[len("openai/"):]
+        if "/" in clean_model:
+            clean_model = clean_model.split("/")[-1]
         
         # Convert the messages to a format LiteLLM can understand
         converted_request = convert_anthropic_to_litellm(
