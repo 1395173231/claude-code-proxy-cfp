@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repository contains a Python-based proxy server that translates Anthropic API requests to LiteLLM, which then routes them to OpenAI or Google Gemini models. It allows Anthropic clients (like Claude Code) to interact with non-Anthropic backends.
 
 - `server.py`: The main FastAPI application that handles incoming Anthropic API requests, translates them, and forwards them to LiteLLM. It manages model mapping and response conversion.
-- `cfp_adapter.py`: Contains logic for adapting Claude Function Protocol (CFP) to LiteLLM and vice-versa.
+- `cfp_adapter.py`: Contains logic for adapting Claude Function Protocol (CFP) v2 to LiteLLM and vice-versa. Implements streaming function calls with incremental argument updates, supporting roles like 'call', 'args_delta', and 'args_complete' for efficient real-time tool usage.
 - `cfp_codec.py`: Handles encoding/decoding of CFP messages.
 - `pyproject.toml`: Defines project dependencies (FastAPI, uvicorn, litellm, python-dotenv, httpx, pydantic).
 

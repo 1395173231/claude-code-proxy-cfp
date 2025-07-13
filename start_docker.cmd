@@ -1,0 +1,1 @@
+docker buildx build --builder container-builder  --platform linux/arm64,linux/amd64 -t ahhhliu/claude-code-proxy:latest --push .

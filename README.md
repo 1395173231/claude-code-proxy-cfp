@@ -156,3 +156,82 @@ The proxy handles both streaming and non-streaming responses, maintaining compat
 ## Contributing 🤝
 
 Contributions are welcome! Please feel free to submit a Pull Request. 🎁
+
+## 多渠道配置与模型路由（高级用法） 🚦
+
+本代理支持**多渠道API路由**，可通过模型名后缀 `:渠道名` 灵活指定不同API端点和KEY，适用于多供应商/多账号/多代理等场景。
+
+### 环境变量配置
+
+在 `.env` 文件中添加如下内容：
+
+```dotenv
+# 默认渠道配置（向后兼容）
+BASE_URL="https://gemini-balance.eqing.tech/openai/v1"
+API_KEY="sk-UIpCcB7ic4xxxxxx8F5C68744"
+GEMINI_API_KEY="sk-gemini-default"
+OPENAI_API_KEY="sk-openai-default"
+ANTHROPIC_API_KEY="sk-anthropic-default"
+
+# 新增自定义渠道
+CHANNEL_GEMINI2_BASE_URL="https://another-gemini-api.com/v1"
+CHANNEL_GEMINI2_API_KEY="sk-gemini2-key"
+
+CHANNEL_CLAUDE2_BASE_URL="https://another-claude-api.com/v1"
+CHANNEL_CLAUDE2_API_KEY="sk-claude2-key"
+
+# 其他配置保持不变
+PREFERRED_PROVIDER="openai"
+BIG_MODEL="openai/gemini-2.5-pro-cfp"
+SMALL_MODEL="openai/gemini-2.5-flash"
+DEBUG="true"
+```
+
+- `CHANNEL_<NAME>_BASE_URL` 和 `CHANNEL_<NAME>_API_KEY` 用于定义新渠道。
+- `<NAME>` 不区分大小写，调用时统一小写。
+
+### 使用方法
+
+- **默认行为**（不带渠道后缀）：
+  ```json
+  { "model": "gemini/gemini-2.5-pro", ... }
+  ```
+  使用 `BASE_URL` 和 `API_KEY`（或各自模型类型的 KEY）。
+
+- **指定渠道**（推荐）：
+  ```json
+  { "model": "gemini/gemini-2.5-pro:gemini2", ... }
+  { "model": "anthropic/claude-3-opus:claude2", ... }
+  ```
+  路由到对应的 `CHANNEL_GEMINI2_BASE_URL`/`CHANNEL_GEMINI2_API_KEY` 或 `CHANNEL_CLAUDE2_BASE_URL`/`CHANNEL_CLAUDE2_API_KEY`。
+
+#### curl 示例
+
+```bash
+# 默认渠道
+curl -X POST http://localhost:8082/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{ "model": "gemini/gemini-2.5-pro", "max_tokens": 1000, "messages": [{"role": "user", "content": "Hello"}] }'
+
+# 指定 gemini2 渠道
+curl -X POST http://localhost:8082/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{ "model": "gemini/gemini-2.5-pro:gemini2", "max_tokens": 1000, "messages": [{"role": "user", "content": "Hello"}] }'
+
+# 指定 claude2 渠道
+curl -X POST http://localhost:8082/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{ "model": "anthropic/claude-3-opus:claude2", "max_tokens": 1000, "messages": [{"role": "user", "content": "Hello"}] }'
+```
+
+### 主要特性
+
+1. **完全兼容 litellm 前缀**：如 `gemini/`、`openai/`、`anthropic/`，不影响格式识别。
+2. **灵活路由**：通过 `:渠道名` 后缀，任意模型可路由到不同API端点和KEY。
+3. **向后兼容**：不指定渠道时，行为与原有一致。
+4. **多账号/多代理支持**：适合企业、团队、个人多API管理。
+5. **配置简单**：仅需在 `.env` 文件中增加渠道配置。
+
+> ⚠️ 注意：渠道名统一小写，调用时如 `:gemini2`、`:claude2`。
+
+---
