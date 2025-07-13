@@ -1062,7 +1062,7 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
                             text_block_closed = True
                             yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
 
-                        stop_reason = "end_turn"
+                        stop_reason = "max_tokens"
                         if finish_reason == "length":
                             stop_reason = "max_tokens"
                         elif finish_reason == "tool_calls" or cfp_tool_processed or tool_calls_in_progress:
@@ -1090,6 +1090,71 @@ async def handle_streaming(response_generator, original_request: MessagesRequest
         yield "data: [DONE]\n\n"
 
 
+# ========== 新增多渠道配置类 ==========
+class ProviderConfig:
+    def __init__(self):
+        self.providers = {}
+        self._load_config()
+    
+    def _load_config(self):
+        """从环境变量加载多供应商配置"""
+        # 默认配置（当前单一配置）
+        base_url = os.environ.get("BASE_URL", "https://api.openai.com/v1")
+        api_key = os.environ.get("API_KEY", "")
+        
+        # 设置默认供应商
+        self.providers["default"] = {
+            "name": "default",
+            "base_url": base_url,
+            "api_key": api_key
+        }
+        
+        # 加载以渠道名称为前缀的供应商配置
+        # 支持格式：CHANNEL_<name>_BASE_URL 和 CHANNEL_<name>_API_KEY
+        for env_key in os.environ:
+            if env_key.startswith("CHANNEL_") and env_key.endswith("_BASE_URL"):
+                # 提取渠道名称，如 CHANNEL_GEMINI_BASE_URL -> gemini
+                channel_name = env_key[8:-9].lower()  # 去掉 CHANNEL_ 和 _BASE_URL
+                
+                channel_base_url = os.environ.get(env_key)
+                channel_api_key = os.environ.get(f"CHANNEL_{channel_name.upper()}_API_KEY", api_key)
+                
+                if channel_base_url:
+                    self.providers[channel_name] = {
+                        "name": channel_name,
+                        "base_url": channel_base_url,
+                        "api_key": channel_api_key
+                    }
+                    logger.debug(f"Loaded channel {channel_name}: {channel_base_url}")
+    
+    def parse_model_and_channel(self, model_name):
+        """解析模型名称和渠道信息，支持 model:channel 格式，保持 litellm 前缀"""
+        # 检查新的渠道指定格式：model:channel
+        if ":" in model_name:
+            model_part, channel_part = model_name.split(":", 1)
+            channel_name = channel_part.lower()
+            if channel_name in self.providers:
+                return model_part, self.providers[channel_name]
+            else:
+                logger.warning(f"Channel '{channel_name}' not found, using default")
+                return model_part, self.providers["default"]
+        
+        # 没有指定渠道，返回原模型名和默认供应商
+        return model_name, self.providers["default"]
+    
+    def get_provider_for_model(self, model_name):
+        """根据模型名称获取对应的供应商配置"""
+        _, provider = self.parse_model_and_channel(model_name)
+        return provider
+    
+    def get_clean_model_name(self, model_name):
+        """获取去除渠道标识后的模型名称，保持 litellm 前缀"""
+        clean_model, _ = self.parse_model_and_channel(model_name)
+        return clean_model
+
+# 创建全局供应商配置实例
+provider_config = ProviderConfig()
+
 @app.post("/v1/messages")
 async def create_message(
     request: MessagesRequest,
@@ -1102,27 +1167,61 @@ async def create_message(
         display_model = original_model
         if "/" in display_model:
             display_model = display_model.split("/")[-1]
-        if "/" in request.model:
-            clean_model =request.model.split("/")[-1]
+        elif ":" in display_model:
+            display_model = display_model.split(":")[0]
+            if "/" in display_model:
+                display_model = display_model.split("/")[-1]
+        
+        # ============ 获取渠道配置，但保持完整的模型名 ============
+        provider_info = provider_config.get_provider_for_model(request.model)
+        clean_model_with_prefix = provider_config.get_clean_model_name(request.model)
+        
+        # 提取纯模型名（用于URL构建等）
+        if "/" in clean_model_with_prefix:
+            clean_model = clean_model_with_prefix.split("/")[-1]
         else:
-            clean_model = request.model
+            clean_model = clean_model_with_prefix
+        
+        # 更新 request.model 为清理后的模型名（保持 litellm 前缀）
+        request.model = clean_model_with_prefix
+        
+        logger.debug(f"🔌 CHANNEL: {provider_info['name']} - Original: {original_model} -> Clean: {clean_model_with_prefix}")
 
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
 
         # 原有逻辑
         litellm_request = convert_anthropic_to_litellm(request)
         
-        # Determine which API key to use based on the model
-        if request.model.startswith("openai/"):
-            litellm_request["api_key"] = OPENAI_API_KEY
-            logger.debug(f"Using OpenAI API key for model: {request.model}")
-        elif request.model.startswith("gemini/"):
-            litellm_request["api_key"] = GEMINI_API_KEY
-            logger.debug(f"Using Gemini API key for model: {request.model}")
+        # ============ 使用渠道配置，覆盖默认配置 ============
+        if provider_info["name"] != "default":
+            litellm_request["api_key"] = provider_info["api_key"]
+            base_url = provider_info["base_url"]
+            
+            # 特殊处理不同类型模型的URL格式
+            if request.model.startswith("gemini/"):
+                if "/v1" in base_url:
+                    api_url = f"{base_url}/models/{clean_model}"
+                else:
+                    api_url = f"{base_url}/v1beta/models/{clean_model}"
+            else:
+                api_url = base_url
+            
+            litellm_request["api_base"] = api_url
+            litellm_request["base_url"] = api_url
+            
+            logger.debug(f"Using channel: {provider_info['name']} with URL: {api_url}")
         else:
-            litellm_request["api_key"] = ANTHROPIC_API_KEY
-            logger.debug(f"Using Anthropic API key for model: {request.model}")
-        
+            # 使用原有的默认逻辑
+            if request.model.startswith("openai/"):
+                litellm_request["api_key"] = OPENAI_API_KEY
+                logger.debug(f"Using OpenAI API key for model: {request.model}")
+            elif request.model.startswith("gemini/"):
+                litellm_request["api_key"] = GEMINI_API_KEY
+                logger.debug(f"Using Gemini API key for model: {request.model}")
+            else:
+                litellm_request["api_key"] = ANTHROPIC_API_KEY
+                logger.debug(f"Using Anthropic API key for model: {request.model}")
+
         # For OpenAI models - modify request format to work with limitations
         if "openai" in litellm_request["model"] and "messages" in litellm_request:
             logger.debug(f"Processing OpenAI model request: {litellm_request['model']}")
@@ -1271,17 +1370,19 @@ async def create_message(
             _cfp_used = False
         # Only log basic info about the request, not the full details
         logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
-        api_base = os.environ.get("BASE_URL", os.environ.get("API_BASE", "https://api.openai.com/v1"));
-        if request.model.startswith("gemini"):
-            if "/v1" in api_base:
-                api_base += f"/models/{clean_model}"
-            else:
-                api_base += f"/v1beta/models/{clean_model}"
-        litellm_request.update({
-            "api_base": api_base,
-            "base_url": api_base,
-            "api_key": os.environ.get("API_KEY", "<KEY>"),
-        })
+        # 只有在使用默认渠道时才应用原有的URL逻辑
+        if provider_info["name"] == "default":
+            api_base = os.environ.get("BASE_URL", os.environ.get("API_BASE", "https://api.openai.com/v1"))
+            if request.model.startswith("gemini"):
+                if "/v1" in api_base:
+                    api_base += f"/models/{clean_model}"
+                else:
+                    api_base += f"/v1beta/models/{clean_model}"
+            litellm_request.update({
+                "api_base": api_base,
+                "base_url": api_base,
+                "api_key": os.environ.get("API_KEY", "<KEY>"),
+            })
         # Handle streaming mode
         if request.stream:
             # Use LiteLLM for streaming
